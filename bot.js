@@ -1,7 +1,8 @@
 /* 
-LONER TECH NUMBER BOT v3.0
+LONER TECH NUMBER BOT v3.1
 Premium OTP Service with Rich Messages
-Bot API 10.3+
+Bot API 10.1+ - Fixed button placement
+Buttons now at top level of payload (not inside rich_message)
 */
 
 require('dotenv').config();
@@ -218,19 +219,28 @@ async function sendRichMessage(chatId, markdown, buttons = null) {
             disable_web_page_preview: true
         };
 
-        // Add buttons if provided (Bot API 10.3+)
+        // Add buttons at TOP LEVEL (Bot API 10.1+ format)
         if (buttons && buttons.length > 0) {
-            payload.rich_message.buttons = buttons.map(btn => ({
-                type: 'callback',
-                text: smallCaps(btn.text),
-                callback_data: btn.callback_data
-            }));
+            payload.reply_markup = {
+                inline_keyboard: [buttons.map(btn => {
+                    if (btn.url) {
+                        return {
+                            text: smallCaps(btn.text),
+                            url: btn.url
+                        };
+                    }
+                    return {
+                        text: smallCaps(btn.text),
+                        callback_data: btn.callback_data
+                    };
+                })]
+            };
         }
 
         const response = await axios.post(`${API_BASE}/sendRichMessage`, payload);
         return response.data;
     } catch (error) {
-        console.error('Rich message error:', error.response?.data || error.message);
+        console.error('Rich message error:', JSON.stringify(error.response?.data, null, 2) || error.message);
         // Fallback to regular message with HTML formatting
         return await sendFallbackMessage(chatId, markdown, buttons);
     }
@@ -254,10 +264,18 @@ async function sendFallbackMessage(chatId, markdown, buttons = null) {
 
     if (buttons && buttons.length > 0) {
         payload.reply_markup = {
-            inline_keyboard: [buttons.map(btn => ({
-                text: smallCaps(btn.text),
-                callback_data: btn.callback_data
-            }))]
+            inline_keyboard: [buttons.map(btn => {
+                if (btn.url) {
+                    return {
+                        text: smallCaps(btn.text),
+                        url: btn.url
+                    };
+                }
+                return {
+                    text: smallCaps(btn.text),
+                    callback_data: btn.callback_data
+                };
+            })]
         };
     }
 
@@ -276,18 +294,28 @@ async function editRichMessage(chatId, messageId, markdown, buttons = null) {
             }
         };
 
+        // Add buttons at TOP LEVEL (Bot API 10.1+ format)
         if (buttons && buttons.length > 0) {
-            payload.rich_message.buttons = buttons.map(btn => ({
-                type: 'callback',
-                text: smallCaps(btn.text),
-                callback_data: btn.callback_data
-            }));
+            payload.reply_markup = {
+                inline_keyboard: [buttons.map(btn => {
+                    if (btn.url) {
+                        return {
+                            text: smallCaps(btn.text),
+                            url: btn.url
+                        };
+                    }
+                    return {
+                        text: smallCaps(btn.text),
+                        callback_data: btn.callback_data
+                    };
+                })]
+            };
         }
 
         const response = await axios.post(`${API_BASE}/editMessageText`, payload);
         return response.data;
     } catch (error) {
-        console.error('Edit rich message error:', error.response?.data || error.message);
+        console.error('Edit rich message error:', JSON.stringify(error.response?.data, null, 2) || error.message);
         return await editFallbackMessage(chatId, messageId, markdown, buttons);
     }
 }
@@ -308,10 +336,18 @@ async function editFallbackMessage(chatId, messageId, markdown, buttons = null) 
 
     if (buttons && buttons.length > 0) {
         payload.reply_markup = {
-            inline_keyboard: [buttons.map(btn => ({
-                text: smallCaps(btn.text),
-                callback_data: btn.callback_data
-            }))]
+            inline_keyboard: [buttons.map(btn => {
+                if (btn.url) {
+                    return {
+                        text: smallCaps(btn.text),
+                        url: btn.url
+                    };
+                }
+                return {
+                    text: smallCaps(btn.text),
+                    callback_data: btn.callback_data
+                };
+            })]
         };
     }
 
@@ -524,11 +560,16 @@ async function handleStart(msg) {
                      `| ${smallCaps('Support')} | 200+ ${smallCaps('Countries')} |\n\n` +
                      `${smallCaps('Welcome to the ultimate virtual number service! Get started by clicking the buttons below:')}`;
 
-    await sendRichMessage(chatId, markdown, [
+    // Send rich message with buttons at top level
+    const result = await sendRichMessage(chatId, markdown, [
         { text: 'GET NUMBER', callback_data: 'get_number' },
         { text: 'OTP GROUP', url: CHANNEL_URL },
         { text: 'CONTACT', url: CONTACT_URL }
     ]);
+
+    // Log for debugging
+    console.log('Start message sent:', result.ok ? 'SUCCESS' : 'FAILED');
+    return result;
 }
 
 async function handleGetAll(msg) {
