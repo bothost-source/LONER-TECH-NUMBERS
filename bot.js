@@ -19,7 +19,7 @@ const API3_KEY = process.env.API3_KEY || '';
 const BOT_TOKEN = process.env.BOT_TOKEN || '';
 const TARGET_CHAT = process.env.TARGET_CHAT || '';
 const CHANNEL_URL = process.env.CHANNEL_URL || 'https://t.me/your_channel';
-const NUMBER_BOT_URL = process.env.NUMBER_BOT_URL || 'https://t.me/your_bot';
+const CONTACT_URL = process.env.CONTACT_URL || 'https://t.me/your_contact';
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim());
 const PORT = process.env.PORT || 3000;
 const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
@@ -134,199 +134,187 @@ function detectService(message) {
     return 'Unknown Service';
 }
 
+// MASK NUMBER FOR CHANNEL POSTS (e.g., 234****89)
+function maskNumber(number) {
+    const clean = String(number).replace("+", "");
+    if (clean.length > 7) {
+        return clean.substring(0, 3) + "****" + clean.slice(-2);
+    }
+    return clean;
+}
+
+// MASK OTP CODE (e.g., 12**78)
+function maskCode(code) {
+    if (code === "N/A") return code;
+    const clean = String(code);
+    if (clean.length > 4) {
+        return clean.substring(0, 2) + "**" + clean.slice(-2);
+    }
+    return clean;
+}
+
 // ═══════════════════════════════════════════════════════════
 //  📨 RICH MESSAGE BUILDERS (Bot API 10.3)
 // ═══════════════════════════════════════════════════════════
 
-function buildRichTable(title, rows) {
-    const tableRows = rows.map(([label, value]) => [
-        { text: smallCaps(label), type: 'bold' },
-        { text: String(value) }
-    ]);
-    
-    return {
-        type: 'table',
-        title: smallCaps(title),
-        rows: tableRows,
-        is_compact: true
-    };
+function buildRichMarkdown(title, tableRows, quoteText, buttons) {
+    let markdown = `# ${smallCaps(title)}\n\n`;
+
+    // Build table
+    if (tableRows && tableRows.length > 0) {
+        markdown += `| ${smallCaps('Field')} | ${smallCaps('Value')} |\n`;
+        markdown += `| --- | --- |\n`;
+        for (const [label, value] of tableRows) {
+            markdown += `| ${smallCaps(label)} | ${value} |\n`;
+        }
+        markdown += `\n`;
+    }
+
+    // Add quote
+    if (quoteText) {
+        markdown += `> ${quoteText}\n\n`;
+    }
+
+    return markdown;
 }
 
-function buildRichParagraph(text) {
-    return {
-        type: 'paragraph',
-        text: smallCaps(text)
-    };
+function buildServiceMenuMarkdown() {
+    return `# ${smallCaps('SELECT SERVICE')}\n\n` +
+           `| ${smallCaps('Service')} | ${smallCaps('Status')} |\n` +
+           `| --- | --- |\n` +
+           `| WhatsApp | ${smallCaps('Works perfect')} |\n` +
+           `| Facebook | ${smallCaps('High success')} |\n` +
+           `| Telegram | ${smallCaps('Very reliable')} |\n` +
+           `| Instagram | ${smallCaps('Good working')} |\n` +
+           `| Google | ${smallCaps('Works fine')} |\n` +
+           `| Apple | ${smallCaps('Quality numbers')} |\n\n` +
+           `${smallCaps('Choose a service for your number:')}`;
 }
 
-function buildRichHeading(text, level = 1) {
-    return {
-        type: 'heading',
-        level: level,
-        text: smallCaps(text)
-    };
-}
+function buildNumbersListMarkdown(serviceName, numbers) {
+    let markdown = `# ${smallCaps('AVAILABLE NUMBERS')}\n\n`;
+    markdown += `| ${smallCaps('Service')} | ${serviceName} |\n`;
+    markdown += `| --- | --- |\n`;
+    markdown += `| ${smallCaps('Found')} | ${numbers.length} ${smallCaps('numbers')} |\n\n`;
 
-function buildRichQuote(text, expandable = false) {
-    return {
-        type: 'quote',
-        text: smallCaps(text),
-        expandable: expandable
-    };
-}
+    markdown += `| # | ${smallCaps('Number')} |\n`;
+    markdown += `| --- | --- |\n`;
+    numbers.forEach((num, i) => {
+        markdown += `| ${i + 1} | ${num} |\n`;
+    });
 
-function buildRichButtons(buttons) {
-    return {
-        type: 'buttons',
-        buttons: buttons.map(btn => ({
-            type: 'callback',
-            text: smallCaps(btn.text),
-            callback_data: btn.callback_data
-        }))
-    };
-}
-
-function buildRichUrlButton(text, url) {
-    return {
-        type: 'buttons',
-        buttons: [{
-            type: 'url',
-            text: smallCaps(text),
-            url: url
-        }]
-    };
+    markdown += `\n${smallCaps('Click a number to subscribe:')}`;
+    return markdown;
 }
 
 // SEND RICH MESSAGE
-async function sendRichMessage(chatId, blocks, options = {}) {
+async function sendRichMessage(chatId, markdown, buttons = null) {
     try {
         const payload = {
             chat_id: chatId,
             rich_message: {
-                blocks: blocks
+                markdown: markdown
             },
             disable_web_page_preview: true
         };
-        
-        if (options.replyTo) {
-            payload.reply_to_message_id = options.replyTo;
+
+        // Add buttons if provided (Bot API 10.3+)
+        if (buttons && buttons.length > 0) {
+            payload.rich_message.buttons = buttons.map(btn => ({
+                type: 'callback',
+                text: smallCaps(btn.text),
+                callback_data: btn.callback_data
+            }));
         }
-        
+
         const response = await axios.post(`${API_BASE}/sendRichMessage`, payload);
         return response.data;
     } catch (error) {
         console.error('Rich message error:', error.response?.data || error.message);
-        // Fallback to regular message
-        return await sendFallbackMessage(chatId, blocks, options);
+        // Fallback to regular message with HTML formatting
+        return await sendFallbackMessage(chatId, markdown, buttons);
     }
 }
 
 // FALLBACK TO REGULAR MESSAGE
-async function sendFallbackMessage(chatId, blocks, options = {}) {
-    let text = '';
-    let keyboard = null;
-    
-    for (const block of blocks) {
-        if (block.type === 'heading') {
-            text += `<b>${escapeHtml(block.text)}</b>\n\n`;
-        } else if (block.type === 'paragraph') {
-            text += `${escapeHtml(block.text)}\n\n`;
-        } else if (block.type === 'table') {
-            text += `<b>${escapeHtml(block.title)}</b>\n`;
-            text += `<pre>`;
-            for (const row of block.rows) {
-                const label = row[0].text;
-                const value = row[1].text;
-                text += `${label.padEnd(15)} │ ${value}\n`;
-            }
-            text += `</pre>\n\n`;
-        } else if (block.type === 'quote') {
-            text += `<blockquote>${escapeHtml(block.text)}</blockquote>\n\n`;
-        } else if (block.type === 'buttons') {
-            keyboard = {
-                inline_keyboard: [block.buttons.map(btn => ({
-                    text: btn.text,
-                    callback_data: btn.callback_data || btn.url
-                }))]
-            };
-        }
-    }
-    
+async function sendFallbackMessage(chatId, markdown, buttons = null) {
+    // Convert markdown to HTML for fallback
+    let html = markdown
+        .replace(/^# (.*$)/gim, '<b>$1</b>')
+        .replace(/^\| (.*?) \| (.*?) \|$/gim, '<code>$1: $2</code>')
+        .replace(/^> (.*$)/gim, '<blockquote>$1</blockquote>')
+        .replace(/\n/g, '<br>');
+
     const payload = {
         chat_id: chatId,
-        text: text.trim(),
+        text: html,
         parse_mode: 'HTML',
         disable_web_page_preview: true
     };
-    
-    if (keyboard) {
-        payload.reply_markup = keyboard;
+
+    if (buttons && buttons.length > 0) {
+        payload.reply_markup = {
+            inline_keyboard: [buttons.map(btn => ({
+                text: smallCaps(btn.text),
+                callback_data: btn.callback_data
+            }))]
+        };
     }
-    
+
     const response = await axios.post(`${API_BASE}/sendMessage`, payload);
     return response.data;
 }
 
 // EDIT RICH MESSAGE
-async function editRichMessage(chatId, messageId, blocks) {
+async function editRichMessage(chatId, messageId, markdown, buttons = null) {
     try {
         const payload = {
             chat_id: chatId,
             message_id: messageId,
             rich_message: {
-                blocks: blocks
+                markdown: markdown
             }
         };
-        
+
+        if (buttons && buttons.length > 0) {
+            payload.rich_message.buttons = buttons.map(btn => ({
+                type: 'callback',
+                text: smallCaps(btn.text),
+                callback_data: btn.callback_data
+            }));
+        }
+
         const response = await axios.post(`${API_BASE}/editMessageText`, payload);
         return response.data;
     } catch (error) {
         console.error('Edit rich message error:', error.response?.data || error.message);
-        return await editFallbackMessage(chatId, messageId, blocks);
+        return await editFallbackMessage(chatId, messageId, markdown, buttons);
     }
 }
 
-async function editFallbackMessage(chatId, messageId, blocks) {
-    let text = '';
-    let keyboard = null;
-    
-    for (const block of blocks) {
-        if (block.type === 'heading') {
-            text += `<b>${escapeHtml(block.text)}</b>\n\n`;
-        } else if (block.type === 'paragraph') {
-            text += `${escapeHtml(block.text)}\n\n`;
-        } else if (block.type === 'table') {
-            text += `<b>${escapeHtml(block.title)}</b>\n`;
-            text += `<pre>`;
-            for (const row of block.rows) {
-                const label = row[0].text;
-                const value = row[1].text;
-                text += `${label.padEnd(15)} │ ${value}\n`;
-            }
-            text += `</pre>\n\n`;
-        } else if (block.type === 'quote') {
-            text += `<blockquote>${escapeHtml(block.text)}</blockquote>\n\n`;
-        } else if (block.type === 'buttons') {
-            keyboard = {
-                inline_keyboard: [block.buttons.map(btn => ({
-                    text: btn.text,
-                    callback_data: btn.callback_data || btn.url
-                }))]
-            };
-        }
-    }
-    
+async function editFallbackMessage(chatId, messageId, markdown, buttons = null) {
+    let html = markdown
+        .replace(/^# (.*$)/gim, '<b>$1</b>')
+        .replace(/^\| (.*?) \| (.*?) \|$/gim, '<code>$1: $2</code>')
+        .replace(/^> (.*$)/gim, '<blockquote>$1</blockquote>')
+        .replace(/\n/g, '<br>');
+
     const payload = {
         chat_id: chatId,
         message_id: messageId,
-        text: text.trim(),
+        text: html,
         parse_mode: 'HTML'
     };
-    
-    if (keyboard) {
-        payload.reply_markup = keyboard;
+
+    if (buttons && buttons.length > 0) {
+        payload.reply_markup = {
+            inline_keyboard: [buttons.map(btn => ({
+                text: smallCaps(btn.text),
+                callback_data: btn.callback_data
+            }))]
+        };
     }
-    
+
     const response = await axios.post(`${API_BASE}/editMessageText`, payload);
     return response.data;
 }
@@ -365,7 +353,7 @@ async function fetchTokenApi(url, token, lastTs) {
         for (let i = data.length - 1; i >= 0; i--) {
             const row = data[i];
             if (row && String(row[3]) > lastTs) {
-                await sendSms(String(row[0] || "Unknown"), String(row[1] || ""), String(row[2] || ""), String(row[3] || ""));
+                await processSms(String(row[0] || "Unknown"), String(row[1] || ""), String(row[2] || ""), String(row[3] || ""));
             }
         }
         saveStats();
@@ -397,7 +385,7 @@ async function fetchPscallApi(lastTs) {
         for (let i = items.length - 1; i >= 0; i--) {
             const item = items[i];
             if (item && String(item.dateadded) > lastTs) {
-                await sendSms(String(item.cli || "Unknown"), String(item.num || ""), String(item.sms || ""), String(item.dateadded || ""));
+                await processSms(String(item.cli || "Unknown"), String(item.num || ""), String(item.sms || ""), String(item.dateadded || ""));
             }
         }
         saveStats();
@@ -423,10 +411,10 @@ async function fetchAllNumbers() {
 }
 
 // ═══════════════════════════════════════════════════════════
-//  📨 SEND SMS ALERT WITH RICH MESSAGE
+//  📨 PROCESS SMS - ONLY SEND IF SOMEONE IS SUBSCRIBED
 // ═══════════════════════════════════════════════════════════
 
-async function sendSms(service, number, message, date) {
+async function processSms(service, number, message, date) {
     try {
         if (!isBotActive) return;
         const uid = `${date}|${number}|${message.substring(0, 30)}`;
@@ -452,44 +440,50 @@ async function sendSms(service, number, message, date) {
         const country = getCountry(number);
         const code = extractCode(message);
         const detectedService = detectService(message);
-        const clean = String(number).replace("+", "");
-        const masked = clean.length > 7 ? clean.substring(0, 6) + "****" + clean.slice(-3) : clean;
 
-        // Build rich message blocks
-        const blocks = [
-            buildRichHeading('NEW OTP ALERT'),
-            buildRichTable('OTP DETAILS', [
-                ['Country', country],
-                ['Number', masked],
-                ['Service', service],
-                ['Detected', detectedService],
-                ['Code', code],
-                ['Time', new Date().toLocaleString()]
-            ]),
-            buildRichQuote(message.length > 100 ? message.substring(0, 100) + '...' : message),
-            buildRichButtons([
-                { text: 'GET NUMBER', callback_data: 'get_number' }
-            ])
-        ];
-
-        await sendRichMessage(TARGET_CHAT, blocks);
-
-        // Send to subscribers
+        // Check if anyone is subscribed to this number
         const subscribers = numberSubscribers.get(cleanNum);
-        if (subscribers && subscribers.size > 0) {
-            const subBlocks = [
-                buildRichHeading('OTP RECEIVED'),
-                buildRichTable('DETAILS', [
+        const hasSubscribers = subscribers && subscribers.size > 0;
+
+        // ONLY send to channel if someone has subscribed to this number
+        if (hasSubscribers) {
+            const maskedNum = maskNumber(cleanNum);
+            const maskedOtp = maskCode(code);
+
+            const channelMarkdown = buildRichMarkdown(
+                'NEW OTP ALERT',
+                [
+                    ['Country', country],
+                    ['Number', maskedNum],
+                    ['Service', service],
+                    ['Detected', detectedService],
+                    ['Code', maskedOtp],
+                    ['Time', new Date().toLocaleString()]
+                ],
+                message.length > 100 ? message.substring(0, 100) + '...' : message
+            );
+
+            await sendRichMessage(TARGET_CHAT, channelMarkdown, [
+                { text: 'GET NUMBER', callback_data: 'get_number' }
+            ]);
+        }
+
+        // Send full OTP to subscribers (private)
+        if (hasSubscribers) {
+            const subMarkdown = buildRichMarkdown(
+                'OTP RECEIVED',
+                [
                     ['Number', cleanNum],
                     ['Code', code],
-                    ['Service', detectedService]
-                ]),
-                buildRichQuote(message.length > 100 ? message.substring(0, 100) + '...' : message)
-            ];
+                    ['Service', detectedService],
+                    ['Time', new Date().toLocaleString()]
+                ],
+                message.length > 100 ? message.substring(0, 100) + '...' : message
+            );
 
             for (const uid of subscribers) {
                 try {
-                    await sendRichMessage(uid, subBlocks);
+                    await sendRichMessage(uid, subMarkdown);
                 } catch (e) {
                     if (e.response && e.response.statusCode === 403) {
                         subscribers.delete(uid);
@@ -498,9 +492,12 @@ async function sendSms(service, number, message, date) {
                 }
             }
         }
-        console.log(`OTP: ${service} | ${masked} | Subs: ${subscribers ? subscribers.size : 0}`);
+
+        if (hasSubscribers) {
+            console.log(`OTP sent to ${subscribers.size} subscribers: ${service} | ${maskNumber(cleanNum)}`);
+        }
     } catch (err) {
-        console.error(`sendSms Error: ${err.message}`);
+        console.error(`processSms Error: ${err.message}`);
     }
 }
 
@@ -511,172 +508,143 @@ async function sendSms(service, number, message, date) {
 async function handleStart(msg) {
     const userId = String(msg.from.id);
     const chatId = msg.chat.id;
-    
+
     if (bannedUsers.has(userId)) {
-        return sendRichMessage(chatId, [
-            buildRichHeading('ACCESS DENIED'),
-            buildRichParagraph('You are banned from using this bot.')
-        ]);
+        return sendRichMessage(chatId, `# ${smallCaps('ACCESS DENIED')}\n\n${smallCaps('You are banned from using this bot.')}`);
     }
-    
+
     botStats.activeUsers.add(userId);
     saveStats();
 
-    const blocks = [
-        buildRichHeading('LONER TECH NUMBER BOT'),
-        buildRichTable('BOT INFO', [
-            ['Version', '3.0 Premium'],
-            ['Status', 'Online'],
-            ['Service', 'Virtual Numbers'],
-            ['Support', '200+ Countries']
-        ]),
-        buildRichParagraph('Welcome to the ultimate virtual number service! Get started by clicking the buttons below:'),
-        buildRichButtons([
-            { text: 'GET NUMBER', callback_data: 'get_number' }
-        ]),
-        buildRichUrlButton('OTP GROUP', CHANNEL_URL),
-        buildRichUrlButton('CONTACT', 'https://t.me/your_contact')
-    ];
+    const markdown = `# ${smallCaps('LONER TECH NUMBER BOT')}\n\n` +
+                     `| ${smallCaps('Version')} | 3.0 Premium |\n` +
+                     `| --- | --- |\n` +
+                     `| ${smallCaps('Status')} | Online |\n` +
+                     `| ${smallCaps('Service')} | ${smallCaps('Virtual Numbers')} |\n` +
+                     `| ${smallCaps('Support')} | 200+ ${smallCaps('Countries')} |\n\n` +
+                     `${smallCaps('Welcome to the ultimate virtual number service! Get started by clicking the buttons below:')}`;
 
-    await sendRichMessage(chatId, blocks);
+    await sendRichMessage(chatId, markdown, [
+        { text: 'GET NUMBER', callback_data: 'get_number' },
+        { text: 'OTP GROUP', url: CHANNEL_URL },
+        { text: 'CONTACT', url: CONTACT_URL }
+    ]);
 }
 
 async function handleGetAll(msg) {
     const userId = String(msg.from.id);
     if (!ADMIN_IDS.includes(userId)) {
-        return sendRichMessage(msg.chat.id, [
-            buildRichHeading('ACCESS DENIED'),
-            buildRichParagraph('Admin only command.')
-        ]);
+        return sendRichMessage(msg.chat.id, `# ${smallCaps('ACCESS DENIED')}\n\n${smallCaps('Admin only command.')}`);
     }
-    
+
     const chatId = msg.chat.id;
-    const loadingBlocks = [
-        buildRichParagraph('Fetching all numbers...')
-    ];
-    const loadingMsg = await sendRichMessage(chatId, loadingBlocks);
-    
+    const loadingMsg = await sendRichMessage(chatId, smallCaps('Fetching all numbers...'));
+
     try {
         const allNumbers = await fetchAllNumbers();
         if (allNumbers.length === 0) {
-            return editRichMessage(chatId, loadingMsg.result.message_id, [
-                buildRichHeading('NO NUMBERS'),
-                buildRichParagraph('No numbers found in cache.')
-            ]);
+            return editRichMessage(chatId, loadingMsg.result.message_id, 
+                `# ${smallCaps('NO NUMBERS')}\n\n${smallCaps('No numbers found in cache.')}`);
         }
-        
-        const displayNumbers = allNumbers.slice(0, 50);
-        const numberRows = displayNumbers.map((num, i) => [`#${i + 1}`, num]);
-        
-        const blocks = [
-            buildRichHeading('ALL AVAILABLE NUMBERS'),
-            buildRichTable('SUMMARY', [
-                ['Total', `${allNumbers.length} numbers`],
-                ['Showing', `${displayNumbers.length} numbers`],
-                ['Updated', new Date().toLocaleString()]
-            ]),
-            buildRichTable('NUMBERS', numberRows)
-        ];
 
-        await editRichMessage(chatId, loadingMsg.result.message_id, blocks);
+        const displayNumbers = allNumbers.slice(0, 50);
+
+        let markdown = `# ${smallCaps('ALL AVAILABLE NUMBERS')}\n\n`;
+        markdown += `| ${smallCaps('Total')} | ${allNumbers.length} ${smallCaps('numbers')} |\n`;
+        markdown += `| --- | --- |\n`;
+        markdown += `| ${smallCaps('Showing')} | ${displayNumbers.length} ${smallCaps('numbers')} |\n`;
+        markdown += `| ${smallCaps('Updated')} | ${new Date().toLocaleString()} |\n\n`;
+
+        markdown += `| # | ${smallCaps('Number')} |\n`;
+        markdown += `| --- | --- |\n`;
+        displayNumbers.forEach((num, i) => {
+            markdown += `| ${i + 1} | ${num} |\n`;
+        });
+
+        await editRichMessage(chatId, loadingMsg.result.message_id, markdown);
     } catch (err) {
-        await editRichMessage(chatId, loadingMsg.result.message_id, [
-            buildRichHeading('ERROR'),
-            buildRichParagraph(`Error: ${err.message}`)
-        ]);
+        await editRichMessage(chatId, loadingMsg.result.message_id,
+            `# ${smallCaps('ERROR')}\n\n${smallCaps('Error: ' + err.message)}`);
     }
 }
 
 async function handleMySubs(msg) {
     const userId = String(msg.from.id);
     const chatId = msg.chat.id;
-    
+
     let subs = [];
     for (const [num, set] of numberSubscribers) {
         if (set.has(userId)) subs.push(num);
     }
-    
+
     if (subs.length === 0) {
-        return sendRichMessage(chatId, [
-            buildRichHeading('NO SUBSCRIPTIONS'),
-            buildRichParagraph('You are not subscribed to any number. Use GET NUMBER to subscribe.')
-        ]);
+        return sendRichMessage(chatId, 
+            `# ${smallCaps('NO SUBSCRIPTIONS')}\n\n${smallCaps('You are not subscribed to any number. Use GET NUMBER to subscribe.')}`);
     }
-    
-    const subRows = subs.map((num, i) => [`#${i + 1}`, num]);
-    
-    const blocks = [
-        buildRichHeading('YOUR SUBSCRIPTIONS'),
-        buildRichTable('SUBSCRIPTIONS', subRows),
-        buildRichParagraph('Use /unsubscribe to stop receiving OTPs.')
-    ];
-    
-    await sendRichMessage(chatId, blocks);
+
+    let markdown = `# ${smallCaps('YOUR SUBSCRIPTIONS')}\n\n`;
+    markdown += `| # | ${smallCaps('Number')} |\n`;
+    markdown += `| --- | --- |\n`;
+    subs.forEach((num, i) => {
+        markdown += `| ${i + 1} | ${num} |\n`;
+    });
+    markdown += `\n${smallCaps('Use /unsubscribe to stop receiving OTPs.')}`;
+
+    await sendRichMessage(chatId, markdown);
 }
 
 async function handleUnsubscribe(msg, match) {
     const userId = String(msg.from.id);
     const num = match[1].trim();
     const subs = numberSubscribers.get(num);
-    
+
     if (subs && subs.has(userId)) {
         subs.delete(userId);
         if (subs.size === 0) numberSubscribers.delete(num);
-        await sendRichMessage(msg.chat.id, [
-            buildRichHeading('UNSUBSCRIBED'),
-            buildRichTable('DETAILS', [
-                ['Number', num],
-                ['Status', 'Removed']
-            ])
-        ]);
+        await sendRichMessage(msg.chat.id,
+            `# ${smallCaps('UNSUBSCRIBED')}\n\n` +
+            `| ${smallCaps('Number')} | ${num} |\n` +
+            `| --- | --- |\n` +
+            `| ${smallCaps('Status')} | ${smallCaps('Removed')} |`);
     } else {
-        await sendRichMessage(msg.chat.id, [
-            buildRichHeading('NOT SUBSCRIBED'),
-            buildRichParagraph(`You are not subscribed to ${num}`)
-        ]);
+        await sendRichMessage(msg.chat.id,
+            `# ${smallCaps('NOT SUBSCRIBED')}\n\n${smallCaps('You are not subscribed to ' + num)}`);
     }
 }
 
 async function handleStats(msg) {
     if (!ADMIN_IDS.includes(String(msg.from.id))) return;
-    
+
     const uptime = Math.floor((Date.now() - botStats.botUptime) / 1000);
     const hours = Math.floor(uptime / 3600);
     const minutes = Math.floor((uptime % 3600) / 60);
-    
-    const blocks = [
-        buildRichHeading('BOT STATISTICS'),
-        buildRichTable('STATS', [
-            ['Status', isBotActive ? 'Active' : 'Paused'],
-            ['Uptime', `${hours}h ${minutes}m`],
-            ['Total OTPs', botStats.totalOTPs],
-            ['Total Numbers', botStats.totalNumbers],
-            ['Active Users', botStats.activeUsers.size],
-            ['API Calls', botStats.apiCalls],
-            ['Errors', botStats.errors],
-            ['Banned', bannedUsers.size]
-        ])
-    ];
-    
-    await sendRichMessage(msg.chat.id, blocks);
+
+    const markdown = `# ${smallCaps('BOT STATISTICS')}\n\n` +
+                     `| ${smallCaps('Status')} | ${isBotActive ? smallCaps('Active') : smallCaps('Paused')} |\n` +
+                     `| --- | --- |\n` +
+                     `| ${smallCaps('Uptime')} | ${hours}h ${minutes}m |\n` +
+                     `| ${smallCaps('Total OTPs')} | ${botStats.totalOTPs} |\n` +
+                     `| ${smallCaps('Total Numbers')} | ${botStats.totalNumbers} |\n` +
+                     `| ${smallCaps('Active Users')} | ${botStats.activeUsers.size} |\n` +
+                     `| ${smallCaps('API Calls')} | ${botStats.apiCalls} |\n` +
+                     `| ${smallCaps('Errors')} | ${botStats.errors} |\n` +
+                     `| ${smallCaps('Banned')} | ${bannedUsers.size} |`;
+
+    await sendRichMessage(msg.chat.id, markdown);
 }
 
 async function handlePause(msg) {
     if (!ADMIN_IDS.includes(String(msg.from.id))) return;
     isBotActive = false;
-    await sendRichMessage(msg.chat.id, [
-        buildRichHeading('BOT PAUSED'),
-        buildRichParagraph('Bot has been paused. Use /resume to continue.')
-    ]);
+    await sendRichMessage(msg.chat.id,
+        `# ${smallCaps('BOT PAUSED')}\n\n${smallCaps('Bot has been paused. Use /resume to continue.')}`);
 }
 
 async function handleResume(msg) {
     if (!ADMIN_IDS.includes(String(msg.from.id))) return;
     isBotActive = true;
-    await sendRichMessage(msg.chat.id, [
-        buildRichHeading('BOT RESUMED'),
-        buildRichParagraph('Bot is now active.')
-    ]);
+    await sendRichMessage(msg.chat.id,
+        `# ${smallCaps('BOT RESUMED')}\n\n${smallCaps('Bot is now active.')}`);
 }
 
 async function handleBan(msg, match) {
@@ -689,14 +657,12 @@ async function handleBan(msg, match) {
         if (subs.size === 0) numberSubscribers.delete(num);
     }
     saveStats();
-    
-    await sendRichMessage(msg.chat.id, [
-        buildRichHeading('USER BANNED'),
-        buildRichTable('DETAILS', [
-            ['User ID', targetId],
-            ['Status', 'Banned']
-        ])
-    ]);
+
+    await sendRichMessage(msg.chat.id,
+        `# ${smallCaps('USER BANNED')}\n\n` +
+        `| ${smallCaps('User ID')} | ${targetId} |\n` +
+        `| --- | --- |\n` +
+        `| ${smallCaps('Status')} | ${smallCaps('Banned')} |`);
 }
 
 async function handleUnban(msg, match) {
@@ -704,14 +670,12 @@ async function handleUnban(msg, match) {
     const targetId = match[1];
     bannedUsers.delete(targetId);
     saveStats();
-    
-    await sendRichMessage(msg.chat.id, [
-        buildRichHeading('USER UNBANNED'),
-        buildRichTable('DETAILS', [
-            ['User ID', targetId],
-            ['Status', 'Unbanned']
-        ])
-    ]);
+
+    await sendRichMessage(msg.chat.id,
+        `# ${smallCaps('USER UNBANNED')}\n\n` +
+        `| ${smallCaps('User ID')} | ${targetId} |\n` +
+        `| --- | --- |\n` +
+        `| ${smallCaps('Status')} | ${smallCaps('Unbanned')} |`);
 }
 
 async function handleClearCache(msg) {
@@ -721,92 +685,74 @@ async function handleClearCache(msg) {
     seenIds.clear();
     botStats.totalOTPs = 0;
     saveStats();
-    
-    await sendRichMessage(msg.chat.id, [
-        buildRichHeading('CACHE CLEARED'),
-        buildRichParagraph('All caches have been cleared.')
-    ]);
+
+    await sendRichMessage(msg.chat.id,
+        `# ${smallCaps('CACHE CLEARED')}\n\n${smallCaps('All caches have been cleared.')}`);
 }
 
 async function handleBanned(msg) {
     if (!ADMIN_IDS.includes(String(msg.from.id))) return;
-    
+
     if (bannedUsers.size === 0) {
-        return sendRichMessage(msg.chat.id, [
-            buildRichHeading('NO BANNED USERS'),
-            buildRichParagraph('The ban list is empty.')
-        ]);
+        return sendRichMessage(msg.chat.id,
+            `# ${smallCaps('NO BANNED USERS')}\n\n${smallCaps('The ban list is empty.')}`);
     }
-    
-    const bannedRows = [...bannedUsers].map((id, i) => [`#${i + 1}`, id]);
-    
-    await sendRichMessage(msg.chat.id, [
-        buildRichHeading('BANNED USERS'),
-        buildRichTable('BAN LIST', bannedRows)
-    ]);
+
+    let markdown = `# ${smallCaps('BANNED USERS')}\n\n`;
+    markdown += `| # | ${smallCaps('User ID')} |\n`;
+    markdown += `| --- | --- |\n`;
+    [...bannedUsers].forEach((id, i) => {
+        markdown += `| ${i + 1} | ${id} |\n`;
+    });
+
+    await sendRichMessage(msg.chat.id, markdown);
 }
 
 async function handleAdmin(msg) {
     if (!ADMIN_IDS.includes(String(msg.from.id))) {
-        return sendRichMessage(msg.chat.id, [
-            buildRichHeading('ACCESS DENIED'),
-            buildRichParagraph('Admin only command.')
-        ]);
+        return sendRichMessage(msg.chat.id,
+            `# ${smallCaps('ACCESS DENIED')}\n\n${smallCaps('Admin only command.')}`);
     }
-    
-    const blocks = [
-        buildRichHeading('ADMIN CONTROL PANEL'),
-        buildRichTable('STATUS', [
-            ['Bot Status', isBotActive ? 'Active' : 'Paused'],
-            ['Version', '3.0 Premium']
-        ]),
-        buildRichParagraph('Select an action:'),
-        buildRichButtons([
-            { text: 'STATISTICS', callback_data: 'admin_stats' },
-            { text: 'PAUSE BOT', callback_data: 'admin_pause' }
-        ]),
-        buildRichButtons([
-            { text: 'RESUME BOT', callback_data: 'admin_resume' },
-            { text: 'CLEAR CACHE', callback_data: 'admin_clear' }
-        ]),
-        buildRichButtons([
-            { text: 'BANNED USERS', callback_data: 'admin_banned' }
-        ])
-    ];
 
-    await sendRichMessage(msg.chat.id, blocks);
+    const markdown = `# ${smallCaps('ADMIN CONTROL PANEL')}\n\n` +
+                     `| ${smallCaps('Bot Status')} | ${isBotActive ? smallCaps('Active') : smallCaps('Paused')} |\n` +
+                     `| --- | --- |\n` +
+                     `| ${smallCaps('Version')} | 3.0 Premium |\n\n` +
+                     `${smallCaps('Select an action:')}`;
+
+    await sendRichMessage(msg.chat.id, markdown, [
+        { text: 'STATISTICS', callback_data: 'admin_stats' },
+        { text: 'PAUSE BOT', callback_data: 'admin_pause' },
+        { text: 'RESUME BOT', callback_data: 'admin_resume' },
+        { text: 'CLEAR CACHE', callback_data: 'admin_clear' },
+        { text: 'BANNED USERS', callback_data: 'admin_banned' }
+    ]);
 }
 
 async function handleBroadcast(msg, match) {
     if (!ADMIN_IDS.includes(String(msg.from.id))) return;
     const messageToBroadcast = match[1];
-    
-    const sentMsg = await sendRichMessage(msg.chat.id, [
-        buildRichHeading('BROADCASTING'),
-        buildRichTable('INFO', [
-            ['Message', messageToBroadcast.substring(0, 50) + '...'],
-            ['Target', `${botStats.activeUsers.size} users`]
-        ])
-    ]);
-    
+
+    const sentMsg = await sendRichMessage(msg.chat.id,
+        `# ${smallCaps('BROADCASTING')}\n\n` +
+        `| ${smallCaps('Message')} | ${messageToBroadcast.substring(0, 50)}... |\n` +
+        `| --- | --- |\n` +
+        `| ${smallCaps('Target')} | ${botStats.activeUsers.size} ${smallCaps('users')} |`);
+
     let success = 0, fail = 0;
     for (const uid of botStats.activeUsers) {
         try {
-            await sendRichMessage(uid, [
-                buildRichParagraph(messageToBroadcast)
-            ]);
+            await sendRichMessage(uid, messageToBroadcast);
             success++;
             await new Promise(resolve => setTimeout(resolve, 50));
         } catch (e) { fail++; }
     }
-    
-    await editRichMessage(msg.chat.id, sentMsg.result.message_id, [
-        buildRichHeading('BROADCAST COMPLETE'),
-        buildRichTable('RESULTS', [
-            ['Success', success],
-            ['Failed', fail]
-        ])
-    ]);
+
+    await editRichMessage(msg.chat.id, sentMsg.result.message_id,
+        `# ${smallCaps('BROADCAST COMPLETE')}\n\n` +
+        `| ${smallCaps('Success')} | ${success} |\n` +
+        `| --- | --- |\n` +
+        `| ${smallCaps('Failed')} | ${fail} |`);
 }
 
 // ═══════════════════════════════════════════════════════════
@@ -827,36 +773,16 @@ async function handleCallbackQuery(callbackQuery) {
     // GET NUMBER - Show service selection
     if (data === "get_number") {
         await answerCallback(callbackQuery.id, 'Select a service', true);
-        
-        const blocks = [
-            buildRichHeading('SELECT SERVICE'),
-            buildRichTable('SERVICES', [
-                ['WhatsApp', 'Works perfect'],
-                ['Facebook', 'High success'],
-                ['Telegram', 'Very reliable'],
-                ['Instagram', 'Good working'],
-                ['Google', 'Works fine'],
-                ['Apple', 'Quality numbers']
-            ]),
-            buildRichParagraph('Choose a service for your number:'),
-            buildRichButtons([
-                { text: 'WHATSAPP', callback_data: 'service_whatsapp' },
-                { text: 'FACEBOOK', callback_data: 'service_facebook' }
-            ]),
-            buildRichButtons([
-                { text: 'TELEGRAM', callback_data: 'service_telegram' },
-                { text: 'INSTAGRAM', callback_data: 'service_instagram' }
-            ]),
-            buildRichButtons([
-                { text: 'GOOGLE', callback_data: 'service_google' },
-                { text: 'APPLE', callback_data: 'service_apple' }
-            ]),
-            buildRichButtons([
-                { text: 'RANDOM', callback_data: 'service_random' }
-            ])
-        ];
 
-        await sendRichMessage(chatId, blocks);
+        await sendRichMessage(chatId, buildServiceMenuMarkdown(), [
+            { text: 'WHATSAPP', callback_data: 'service_whatsapp' },
+            { text: 'FACEBOOK', callback_data: 'service_facebook' },
+            { text: 'TELEGRAM', callback_data: 'service_telegram' },
+            { text: 'INSTAGRAM', callback_data: 'service_instagram' },
+            { text: 'GOOGLE', callback_data: 'service_google' },
+            { text: 'APPLE', callback_data: 'service_apple' },
+            { text: 'RANDOM', callback_data: 'service_random' }
+        ]);
         return;
     }
 
@@ -865,17 +791,13 @@ async function handleCallbackQuery(callbackQuery) {
         const serviceType = data.replace('service_', '');
         await answerCallback(callbackQuery.id, `Selected: ${serviceType}`, true);
 
-        const loadingMsg = await sendRichMessage(chatId, [
-            buildRichParagraph(`Fetching ${serviceType} numbers...`)
-        ]);
+        const loadingMsg = await sendRichMessage(chatId, smallCaps(`Fetching ${serviceType} numbers...`));
 
         try {
             let allNumbers = await fetchAllNumbers();
             if (allNumbers.length === 0) {
-                return editRichMessage(chatId, loadingMsg.result.message_id, [
-                    buildRichHeading('NO NUMBERS'),
-                    buildRichParagraph('No numbers available yet. Please wait for OTPs to arrive.')
-                ]);
+                return editRichMessage(chatId, loadingMsg.result.message_id,
+                    `# ${smallCaps('NO NUMBERS')}\n\n${smallCaps('No numbers available yet. Please wait for OTPs to arrive.')}`);
             }
 
             const randomNumbers = allNumbers.sort(() => 0.5 - Math.random()).slice(0, 5);
@@ -886,29 +808,17 @@ async function handleCallbackQuery(callbackQuery) {
             };
             const name = serviceNames[serviceType] || serviceType;
 
-            const numberRows = randomNumbers.map((num, i) => [`#${i + 1}`, num]);
-            
-            const buttonBlocks = randomNumbers.map(num => 
-                buildRichButtons([{ text: `SUBSCRIBE: ${num}`, callback_data: `subscribe_${num}` }])
-            );
+            const subscribeButtons = randomNumbers.map(num => ({
+                text: `SUBSCRIBE: ${num}`,
+                callback_data: `subscribe_${num}`
+            }));
 
-            const blocks = [
-                buildRichHeading('AVAILABLE NUMBERS'),
-                buildRichTable('INFO', [
-                    ['Service', name],
-                    ['Found', `${randomNumbers.length} numbers`]
-                ]),
-                buildRichTable('NUMBERS', numberRows),
-                buildRichParagraph('Click a number to subscribe:'),
-                ...buttonBlocks
-            ];
-
-            await editRichMessage(chatId, loadingMsg.result.message_id, blocks);
+            await editRichMessage(chatId, loadingMsg.result.message_id,
+                buildNumbersListMarkdown(name, randomNumbers),
+                subscribeButtons);
         } catch (err) {
-            await editRichMessage(chatId, loadingMsg.result.message_id, [
-                buildRichHeading('ERROR'),
-                buildRichParagraph(`Error: ${err.message}`)
-            ]);
+            await editRichMessage(chatId, loadingMsg.result.message_id,
+                `# ${smallCaps('ERROR')}\n\n${smallCaps('Error: ' + err.message)}`);
         }
         return;
     }
@@ -923,17 +833,14 @@ async function handleCallbackQuery(callbackQuery) {
         }
         numberSubscribers.get(number).add(userId);
 
-        const blocks = [
-            buildRichHeading('SUBSCRIBED'),
-            buildRichTable('DETAILS', [
-                ['Number', number],
-                ['Status', 'Active']
-            ]),
-            buildRichParagraph('You will now receive OTPs for this number.'),
-            buildRichParagraph('Use /mysubs to see all your subscriptions.')
-        ];
+        const markdown = `# ${smallCaps('SUBSCRIBED')}\n\n` +
+                         `| ${smallCaps('Number')} | ${number} |\n` +
+                         `| --- | --- |\n` +
+                         `| ${smallCaps('Status')} | ${smallCaps('Active')} |\n\n` +
+                         `${smallCaps('You will now receive OTPs for this number.')}\n` +
+                         `${smallCaps('Use /mysubs to see all your subscriptions.')}`;
 
-        await sendRichMessage(chatId, blocks);
+        await sendRichMessage(chatId, markdown);
         return;
     }
 
@@ -943,39 +850,32 @@ async function handleCallbackQuery(callbackQuery) {
         const uptime = Math.floor((Date.now() - botStats.botUptime) / 1000);
         const hours = Math.floor(uptime / 3600);
         const minutes = Math.floor((uptime % 3600) / 60);
-        
-        const blocks = [
-            buildRichHeading('BOT STATISTICS'),
-            buildRichTable('STATS', [
-                ['Status', isBotActive ? 'Active' : 'Paused'],
-                ['Uptime', `${hours}h ${minutes}m`],
-                ['Total OTPs', botStats.totalOTPs],
-                ['Total Numbers', botStats.totalNumbers],
-                ['Active Users', botStats.activeUsers.size],
-                ['API Calls', botStats.apiCalls],
-                ['Errors', botStats.errors]
-            ])
-        ];
-        
-        await sendRichMessage(chatId, blocks);
+
+        const markdown = `# ${smallCaps('BOT STATISTICS')}\n\n` +
+                         `| ${smallCaps('Status')} | ${isBotActive ? smallCaps('Active') : smallCaps('Paused')} |\n` +
+                         `| --- | --- |\n` +
+                         `| ${smallCaps('Uptime')} | ${hours}h ${minutes}m |\n` +
+                         `| ${smallCaps('Total OTPs')} | ${botStats.totalOTPs} |\n` +
+                         `| ${smallCaps('Total Numbers')} | ${botStats.totalNumbers} |\n` +
+                         `| ${smallCaps('Active Users')} | ${botStats.activeUsers.size} |\n` +
+                         `| ${smallCaps('API Calls')} | ${botStats.apiCalls} |\n` +
+                         `| ${smallCaps('Errors')} | ${botStats.errors} |`;
+
+        await sendRichMessage(chatId, markdown);
     }
 
     if (data === "admin_pause") {
         await answerCallback(callbackQuery.id, 'Bot paused', true);
         isBotActive = false;
-        await sendRichMessage(chatId, [
-            buildRichHeading('BOT PAUSED'),
-            buildRichParagraph('Bot has been paused.')
-        ]);
+        await sendRichMessage(chatId,
+            `# ${smallCaps('BOT PAUSED')}\n\n${smallCaps('Bot has been paused.')}`);
     }
 
     if (data === "admin_resume") {
         await answerCallback(callbackQuery.id, 'Bot resumed', true);
         isBotActive = true;
-        await sendRichMessage(chatId, [
-            buildRichHeading('BOT RESUMED'),
-            buildRichParagraph('Bot is now active.')
-        ]);
+        await sendRichMessage(chatId,
+            `# ${smallCaps('BOT RESUMED')}\n\n${smallCaps('Bot is now active.')}`);
     }
 
     if (data === "admin_clear") {
@@ -985,27 +885,25 @@ async function handleCallbackQuery(callbackQuery) {
         seenIds.clear();
         botStats.totalOTPs = 0;
         saveStats();
-        await sendRichMessage(chatId, [
-            buildRichHeading('CACHE CLEARED'),
-            buildRichParagraph('All caches have been cleared.')
-        ]);
+        await sendRichMessage(chatId,
+            `# ${smallCaps('CACHE CLEARED')}\n\n${smallCaps('All caches have been cleared.')}`);
     }
 
     if (data === "admin_banned") {
         await answerCallback(callbackQuery.id, 'Loading banned users...', true);
         if (bannedUsers.size === 0) {
-            return sendRichMessage(chatId, [
-                buildRichHeading('NO BANNED USERS'),
-                buildRichParagraph('The ban list is empty.')
-            ]);
+            return sendRichMessage(chatId,
+                `# ${smallCaps('NO BANNED USERS')}\n\n${smallCaps('The ban list is empty.')}`);
         }
-        
-        const bannedRows = [...bannedUsers].map((id, i) => [`#${i + 1}`, id]);
-        
-        await sendRichMessage(chatId, [
-            buildRichHeading('BANNED USERS'),
-            buildRichTable('BAN LIST', bannedRows)
-        ]);
+
+        let markdown = `# ${smallCaps('BANNED USERS')}\n\n`;
+        markdown += `| # | ${smallCaps('User ID')} |\n`;
+        markdown += `| --- | --- |\n`;
+        [...bannedUsers].forEach((id, i) => {
+            markdown += `| ${i + 1} | ${id} |\n`;
+        });
+
+        await sendRichMessage(chatId, markdown);
     }
 }
 
@@ -1023,17 +921,17 @@ async function pollUpdates() {
                 timeout: 30
             }
         });
-        
+
         const updates = response.data.result;
-        
+
         for (const update of updates) {
             offset = update.update_id + 1;
-            
+
             // Handle messages
             if (update.message) {
                 const msg = update.message;
                 const text = msg.text || '';
-                
+
                 if (text.startsWith('/start')) {
                     await handleStart(msg);
                 } else if (text.startsWith('/getall')) {
@@ -1066,7 +964,7 @@ async function pollUpdates() {
                     if (match) await handleBroadcast(msg, match);
                 }
             }
-            
+
             // Handle callback queries
             if (update.callback_query) {
                 await handleCallbackQuery(update.callback_query);
@@ -1075,7 +973,7 @@ async function pollUpdates() {
     } catch (error) {
         console.error('Polling error:', error.message);
     }
-    
+
     setTimeout(pollUpdates, 1000);
 }
 
@@ -1118,10 +1016,10 @@ async function mainLoop() {
     console.log(`Loner Tech Number Bot v3.0 Started`);
     console.log(`Rich Messages Enabled (Bot API 10.3)`);
     console.log(`24/7 OTP Monitoring Active`);
-    
+
     // Start polling
     pollUpdates();
-    
+
     let ts1 = null, ts2 = null, ts3 = null;
     while (true) {
         try {
