@@ -1,8 +1,15 @@
 /* 
-LONER TECH NUMBER BOT v3.2
+LONER TECH NUMBER BOT v3.3
 Premium OTP Service with Rich Messages
 Bot API 10.1+ - Fixed button placement
-Features: Force Join Channels, OTP Button, Smart Subscribe
+Features: Force Join, OTP Button, Country Select, Persistent Storage
+
+IMPORTANT FOR RENDER:
+Add a Disk in Render Dashboard:
+1. Go to your service → Disks
+2. Add Disk: Name "bot-data", Mount Path "/opt/render/project/src"
+3. Size: 1 GB (free tier sufficient)
+This preserves numbers_cache.json across restarts.
 */
 
 require('dotenv').config();
@@ -133,6 +140,9 @@ let numberSubscribers = new Map();
 const seenIds = new Set();
 
 const STATS_FILE = 'bot_stats.json';
+const NUMBERS_FILE = 'numbers_cache.json';
+const SUBSCRIBERS_FILE = 'subscribers.json';
+
 let botStats = {
     totalOTPs: 0,
     totalNumbers: 0,
@@ -143,6 +153,7 @@ let botStats = {
     errors: 0
 };
 
+// Load stats
 try {
     if (fs.existsSync(STATS_FILE)) {
         const statsData = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
@@ -155,12 +166,62 @@ try {
     }
 } catch (e) {}
 
+// Load numbers cache
+try {
+    if (fs.existsSync(NUMBERS_FILE)) {
+        const numbersData = JSON.parse(fs.readFileSync(NUMBERS_FILE, 'utf8'));
+        rotatingNumbersCache = numbersData.rotating || [];
+        allNumbersCache = numbersData.all || [];
+        console.log(`Loaded ${allNumbersCache.length} numbers from cache`);
+    }
+} catch (e) {}
+
+// Load subscribers
+try {
+    if (fs.existsSync(SUBSCRIBERS_FILE)) {
+        const subsData = JSON.parse(fs.readFileSync(SUBSCRIBERS_FILE, 'utf8'));
+        for (const [num, users] of Object.entries(subsData)) {
+            numberSubscribers.set(num, new Set(users));
+        }
+        console.log(`Loaded ${numberSubscribers.size} number subscriptions`);
+    }
+} catch (e) {}
+
 function saveStats() {
     try {
         const statsToSave = { ...botStats, activeUsers: Array.from(botStats.activeUsers) };
         fs.writeFileSync(STATS_FILE, JSON.stringify(statsToSave, null, 2));
     } catch (e) {}
 }
+
+function saveNumbersCache() {
+    try {
+        const numbersToSave = {
+            rotating: rotatingNumbersCache,
+            all: allNumbersCache,
+            lastSaved: Date.now()
+        };
+        fs.writeFileSync(NUMBERS_FILE, JSON.stringify(numbersToSave, null, 2));
+    } catch (e) {}
+}
+
+function saveSubscribers() {
+    try {
+        const subsToSave = {};
+        for (const [num, users] of numberSubscribers) {
+            subsToSave[num] = Array.from(users);
+        }
+        fs.writeFileSync(SUBSCRIBERS_FILE, JSON.stringify(subsToSave, null, 2));
+    } catch (e) {}
+}
+
+// Auto-save every 5 minutes
+setInterval(() => {
+    saveStats();
+    saveNumbersCache();
+    saveSubscribers();
+    console.log('💾 Auto-saved stats, numbers, and subscribers');
+}, 5 * 60 * 1000);
 
 // COMPACT COUNTRY DATABASE
 const countryDb = {
@@ -554,6 +615,7 @@ async function processSms(service, number, message, date) {
             botStats.totalNumbers = allNumbersCache.length;
             botStats.lastOTP = date;
             saveStats();
+            saveNumbersCache(); // Save immediately when new number found
         }
 
         const country = getCountry(number);
@@ -1004,6 +1066,7 @@ async function handleCallbackQuery(callbackQuery) {
             numberSubscribers.set(number, new Set());
         }
         numberSubscribers.get(number).add(userId);
+        saveSubscribers(); // Save immediately
 
         const markdown = `# ${smallCaps('SUBSCRIBED SUCCESSFULLY')}\n\n` +
                          `| ${smallCaps('Number')} | ${number} |\n` +
@@ -1058,6 +1121,7 @@ async function handleCallbackQuery(callbackQuery) {
         if (subs && subs.has(userId)) {
             subs.delete(userId);
             if (subs.size === 0) numberSubscribers.delete(number);
+            saveSubscribers(); // Save immediately
 
             await answerCallback(callbackQuery.id, 'Unsubscribed', true);
             await editRichMessage(chatId, msg.message_id,
