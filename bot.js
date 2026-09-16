@@ -1,8 +1,8 @@
 /* 
-LONER TECH NUMBER BOT v3.1
+LONER TECH NUMBER BOT v3.2
 Premium OTP Service with Rich Messages
 Bot API 10.1+ - Fixed button placement
-Buttons now at top level of payload (not inside rich_message)
+Features: Force Join Channels, OTP Button, Smart Subscribe
 */
 
 require('dotenv').config();
@@ -21,6 +21,10 @@ const BOT_TOKEN = process.env.BOT_TOKEN || '';
 const TARGET_CHAT = process.env.TARGET_CHAT || '';
 const CHANNEL_URL = process.env.CHANNEL_URL || 'https://t.me/your_channel';
 const CONTACT_URL = process.env.CONTACT_URL || 'https://t.me/your_contact';
+const FORCE_JOIN_CHANNEL_1 = process.env.FORCE_JOIN_CHANNEL_1 || '';
+const FORCE_JOIN_CHANNEL_2 = process.env.FORCE_JOIN_CHANNEL_2 || '';
+const FORCE_JOIN_CHANNEL_1_ID = process.env.FORCE_JOIN_CHANNEL_1_ID || '';
+const FORCE_JOIN_CHANNEL_2_ID = process.env.FORCE_JOIN_CHANNEL_2_ID || '';
 const ADMIN_IDS = (process.env.ADMIN_IDS || '').split(',').map(id => id.trim());
 const PORT = process.env.PORT || 3000;
 const API_BASE = `https://api.telegram.org/bot${BOT_TOKEN}`;
@@ -39,6 +43,85 @@ const smallCapsMap = {
 
 function smallCaps(text) {
     return String(text).split('').map(char => smallCapsMap[char] || char).join('');
+}
+
+// CHECK IF USER IS MEMBER OF REQUIRED CHANNELS
+async function checkForceJoin(userId) {
+    // If no channels configured, allow access
+    if (!FORCE_JOIN_CHANNEL_1_ID && !FORCE_JOIN_CHANNEL_2_ID) {
+        return { joined: true, missing: [] };
+    }
+
+    const missing = [];
+
+    // Check channel 1
+    if (FORCE_JOIN_CHANNEL_1_ID) {
+        try {
+            const response = await axios.post(`${API_BASE}/getChatMember`, {
+                chat_id: FORCE_JOIN_CHANNEL_1_ID,
+                user_id: userId
+            });
+            const status = response.data.result?.status;
+            if (!['member', 'administrator', 'creator'].includes(status)) {
+                missing.push({
+                    name: 'Channel 1',
+                    url: FORCE_JOIN_CHANNEL_1,
+                    id: FORCE_JOIN_CHANNEL_1_ID
+                });
+            }
+        } catch (e) {
+            console.error('Force join check error (channel 1):', e.response?.data || e.message);
+        }
+    }
+
+    // Check channel 2
+    if (FORCE_JOIN_CHANNEL_2_ID) {
+        try {
+            const response = await axios.post(`${API_BASE}/getChatMember`, {
+                chat_id: FORCE_JOIN_CHANNEL_2_ID,
+                user_id: userId
+            });
+            const status = response.data.result?.status;
+            if (!['member', 'administrator', 'creator'].includes(status)) {
+                missing.push({
+                    name: 'Channel 2',
+                    url: FORCE_JOIN_CHANNEL_2,
+                    id: FORCE_JOIN_CHANNEL_2_ID
+                });
+            }
+        } catch (e) {
+            console.error('Force join check error (channel 2):', e.response?.data || e.message);
+        }
+    }
+
+    return {
+        joined: missing.length === 0,
+        missing: missing
+    };
+}
+
+// SEND FORCE JOIN MESSAGE
+async function sendForceJoinMessage(chatId, missingChannels) {
+    let markdown = `# ${smallCaps('JOIN REQUIRED')}\n\n`;
+    markdown += `${smallCaps('You must join our channels to use this bot:')}\n\n`;
+
+    const buttons = [];
+    missingChannels.forEach((ch, i) => {
+        markdown += `| ${smallCaps('Channel ' + (i + 1))} | ${ch.name} |\n`;
+        buttons.push({
+            text: `JOIN ${ch.name.toUpperCase()}`,
+            url: ch.url
+        });
+    });
+
+    markdown += `\n${smallCaps('After joining, click the button below to verify:')}`;
+
+    buttons.push({
+        text: '✅ I HAVE JOINED',
+        callback_data: 'verify_join'
+    });
+
+    return await sendRichMessage(chatId, markdown, buttons);
 }
 
 // GLOBAL STATE
@@ -504,22 +587,24 @@ async function processSms(service, number, message, date) {
             ]);
         }
 
-        // Send full OTP to subscribers (private)
+        // Send full OTP to subscribers (private) - EDIT their existing message
         if (hasSubscribers) {
-            const subMarkdown = buildRichMarkdown(
-                'OTP RECEIVED',
-                [
-                    ['Number', cleanNum],
-                    ['Code', code],
-                    ['Service', detectedService],
-                    ['Time', new Date().toLocaleString()]
-                ],
-                message.length > 100 ? message.substring(0, 100) + '...' : message
-            );
+            const subMarkdown = `# ${smallCaps('OTP RECEIVED')}\n\n` +
+                                `| ${smallCaps('Number')} | ${cleanNum} |\n` +
+                                `| --- | --- |\n` +
+                                `| ${smallCaps('Code')} | ${code} |\n` +
+                                `| ${smallCaps('Service')} | ${detectedService} |\n` +
+                                `| ${smallCaps('Time')} | ${new Date().toLocaleString()} |\n\n` +
+                                `${smallCaps('Full message:')}\n` +
+                                `> ${message.length > 200 ? message.substring(0, 200) + '...' : message}`;
 
             for (const uid of subscribers) {
                 try {
-                    await sendRichMessage(uid, subMarkdown);
+                    // Send new message with OTP (since we can't track which message to edit)
+                    await sendRichMessage(uid, subMarkdown, [
+                        { text: 'CHECK OTP', callback_data: `check_otp_${cleanNum}` },
+                        { text: 'UNSUBSCRIBE', callback_data: `unsubscribe_${cleanNum}` }
+                    ]);
                 } catch (e) {
                     if (e.response && e.response.statusCode === 403) {
                         subscribers.delete(uid);
@@ -549,11 +634,17 @@ async function handleStart(msg) {
         return sendRichMessage(chatId, `# ${smallCaps('ACCESS DENIED')}\n\n${smallCaps('You are banned from using this bot.')}`);
     }
 
+    // Check force join first
+    const joinCheck = await checkForceJoin(userId);
+    if (!joinCheck.joined) {
+        return await sendForceJoinMessage(chatId, joinCheck.missing);
+    }
+
     botStats.activeUsers.add(userId);
     saveStats();
 
     const markdown = `# ${smallCaps('LONER TECH NUMBER BOT')}\n\n` +
-                     `| ${smallCaps('Version')} | 3.0 Premium |\n` +
+                     `| ${smallCaps('Version')} | 3.1 Premium |\n` +
                      `| --- | --- |\n` +
                      `| ${smallCaps('Status')} | Online |\n` +
                      `| ${smallCaps('Service')} | ${smallCaps('Virtual Numbers')} |\n` +
@@ -811,8 +902,48 @@ async function handleCallbackQuery(callbackQuery) {
         return;
     }
 
-    // GET NUMBER - Show service selection
+    // VERIFY JOIN - Check if user joined required channels
+    if (data === "verify_join") {
+        await answerCallback(callbackQuery.id, 'Verifying...', true);
+
+        const joinCheck = await checkForceJoin(userId);
+        if (!joinCheck.joined) {
+            await sendForceJoinMessage(chatId, joinCheck.missing);
+            return;
+        }
+
+        // User joined all channels, show main menu
+        await answerCallback(callbackQuery.id, 'Access granted!', true);
+
+        botStats.activeUsers.add(userId);
+        saveStats();
+
+        const markdown = `# ${smallCaps('LONER TECH NUMBER BOT')}\n\n` +
+                         `| ${smallCaps('Version')} | 3.1 Premium |\n` +
+                         `| --- | --- |\n` +
+                         `| ${smallCaps('Status')} | Online |\n` +
+                         `| ${smallCaps('Service')} | ${smallCaps('Virtual Numbers')} |\n` +
+                         `| ${smallCaps('Support')} | 200+ ${smallCaps('Countries')} |\n\n` +
+                         `${smallCaps('Welcome! You now have access. Get started below:')}`;
+
+        await sendRichMessage(chatId, markdown, [
+            { text: 'GET NUMBER', callback_data: 'get_number' },
+            { text: 'OTP GROUP', url: CHANNEL_URL },
+            { text: 'CONTACT', url: CONTACT_URL }
+        ]);
+        return;
+    }
+
+    // GET NUMBER - Check force join first, then show service selection
     if (data === "get_number") {
+        // Check force join
+        const joinCheck = await checkForceJoin(userId);
+        if (!joinCheck.joined) {
+            await answerCallback(callbackQuery.id, 'Please join channels first', true);
+            await sendForceJoinMessage(chatId, joinCheck.missing);
+            return;
+        }
+
         await answerCallback(callbackQuery.id, 'Select a service', true);
 
         await sendRichMessage(chatId, buildServiceMenuMarkdown(), [
@@ -874,14 +1005,72 @@ async function handleCallbackQuery(callbackQuery) {
         }
         numberSubscribers.get(number).add(userId);
 
-        const markdown = `# ${smallCaps('SUBSCRIBED')}\n\n` +
+        const markdown = `# ${smallCaps('SUBSCRIBED SUCCESSFULLY')}\n\n` +
                          `| ${smallCaps('Number')} | ${number} |\n` +
                          `| --- | --- |\n` +
-                         `| ${smallCaps('Status')} | ${smallCaps('Active')} |\n\n` +
-                         `${smallCaps('You will now receive OTPs for this number.')}\n` +
-                         `${smallCaps('Use /mysubs to see all your subscriptions.')}`;
+                         `| ${smallCaps('Status')} | ${smallCaps('Active')} |\n` +
+                         `| ${smallCaps('OTP')} | ${smallCaps('Waiting for code...')} |\n\n` +
+                         `${smallCaps('You will receive OTPs for this number.')}\n` +
+                         `${smallCaps('Click the button below to check for OTP:')}`;
 
-        await sendRichMessage(chatId, markdown);
+        // Edit the SAME message with OTP button (not a new message)
+        await editRichMessage(chatId, msg.message_id, markdown, [
+            { text: 'CHECK OTP', callback_data: `check_otp_${number}` }
+        ]);
+        return;
+    }
+
+    // CHECK OTP - Show waiting message or latest OTP
+    if (data && data.startsWith('check_otp_')) {
+        const number = data.replace('check_otp_', '');
+        await answerCallback(callbackQuery.id, 'Checking for OTP...', true);
+
+        // Check if there's a recent OTP for this number
+        const subscribers = numberSubscribers.get(number);
+        if (!subscribers || !subscribers.has(userId)) {
+            await editRichMessage(chatId, msg.message_id,
+                `# ${smallCaps('NOT SUBSCRIBED')}\n\n${smallCaps('You are not subscribed to this number.')}`,
+                [{ text: 'GET NUMBER', callback_data: 'get_number' }]
+            );
+            return;
+        }
+
+        // Show waiting status (OTP will be pushed automatically when received)
+        const markdown = `# ${smallCaps('OTP STATUS')}\n\n` +
+                         `| ${smallCaps('Number')} | ${number} |\n` +
+                         `| --- | --- |\n` +
+                         `| ${smallCaps('Status')} | ${smallCaps('Waiting for OTP...')} |\n\n` +
+                         `${smallCaps('OTP will appear here automatically when received.')}\n` +
+                         `${smallCaps('Keep this chat open or check back later.')}`;
+
+        await editRichMessage(chatId, msg.message_id, markdown, [
+            { text: '🔄 REFRESH', callback_data: `check_otp_${number}` },
+            { text: 'UNSUBSCRIBE', callback_data: `unsubscribe_${number}` }
+        ]);
+        return;
+    }
+
+    // UNSUBSCRIBE FROM NUMBER
+    if (data && data.startsWith('unsubscribe_')) {
+        const number = data.replace('unsubscribe_', '');
+
+        const subs = numberSubscribers.get(number);
+        if (subs && subs.has(userId)) {
+            subs.delete(userId);
+            if (subs.size === 0) numberSubscribers.delete(number);
+
+            await answerCallback(callbackQuery.id, 'Unsubscribed', true);
+            await editRichMessage(chatId, msg.message_id,
+                `# ${smallCaps('UNSUBSCRIBED')}\n\n` +
+                `| ${smallCaps('Number')} | ${number} |\n` +
+                `| --- | --- |\n` +
+                `| ${smallCaps('Status')} | ${smallCaps('Removed')} |\n\n` +
+                `${smallCaps('You will no longer receive OTPs for this number.')}`,
+                [{ text: 'GET NUMBER', callback_data: 'get_number' }]
+            );
+        } else {
+            await answerCallback(callbackQuery.id, 'Not subscribed', true);
+        }
         return;
     }
 
