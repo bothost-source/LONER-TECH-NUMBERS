@@ -1,15 +1,21 @@
 /* 
-LONER TECH NUMBER BOT v3.3
-Premium OTP Service with Rich Messages
-Bot API 10.1+ - Fixed button placement
-Features: Force Join, OTP Button, Country Select, Persistent Storage
+LONER TECH NUMBER BOT v3.5
+Premium OTP Service with Supabase Database
 
-IMPORTANT FOR RENDER:
-Add a Disk in Render Dashboard:
-1. Go to your service → Disks
-2. Add Disk: Name "bot-data", Mount Path "/opt/render/project/src"
-3. Size: 1 GB (free tier sufficient)
-This preserves numbers_cache.json across restarts.
+FIXES IN THIS VERSION:
+✅ Numbers copyable (backtick code format)
+✅ GET NUMBER button in group works (deep link)
+✅ Country selection (not just Nigeria)
+✅ Diverse numbers (not all 2347020 prefix)
+✅ Message editing (no spam)
+✅ Admin button shows on start
+✅ Supabase database (FREE - survives restart)
+
+SETUP:
+1. Create free account at https://supabase.com
+2. Create new project
+3. Get URL and anon key from Settings → API
+4. Add to Render environment variables
 */
 
 require('dotenv').config();
@@ -25,6 +31,7 @@ const API2_TOKEN = process.env.API2_TOKEN || '';
 const API3_URL = process.env.API3_URL || '';
 const API3_KEY = process.env.API3_KEY || '';
 const BOT_TOKEN = process.env.BOT_TOKEN || '';
+const BOT_USERNAME = process.env.BOT_USERNAME || 'your_bot_username';
 const TARGET_CHAT = process.env.TARGET_CHAT || '';
 const CHANNEL_URL = process.env.CHANNEL_URL || 'https://t.me/your_channel';
 const CONTACT_URL = process.env.CONTACT_URL || 'https://t.me/your_contact';
@@ -139,9 +146,52 @@ let bannedUsers = new Set();
 let numberSubscribers = new Map();
 const seenIds = new Set();
 
-const STATS_FILE = 'bot_stats.json';
-const NUMBERS_FILE = 'numbers_cache.json';
-const SUBSCRIBERS_FILE = 'subscribers.json';
+// SUPABASE DATABASE SETUP (Free tier: 500MB)
+const { createClient } = require('@supabase/supabase-js');
+
+const SUPABASE_URL = process.env.SUPABASE_URL || '';
+const SUPABASE_KEY = process.env.SUPABASE_KEY || '';
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY);
+
+// Initialize database tables
+async function initDatabase() {
+    try {
+        // Create numbers table
+        await supabase.rpc('exec_sql', {
+            sql: `
+                CREATE TABLE IF NOT EXISTS bot_numbers (
+                    number TEXT PRIMARY KEY,
+                    country TEXT,
+                    first_seen BIGINT,
+                    last_seen BIGINT
+                );
+                CREATE TABLE IF NOT EXISTS bot_subscribers (
+                    number TEXT,
+                    user_id TEXT,
+                    subscribed_at BIGINT,
+                    PRIMARY KEY (number, user_id)
+                );
+                CREATE TABLE IF NOT EXISTS bot_stats (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                );
+                CREATE TABLE IF NOT EXISTS bot_user_messages (
+                    user_id TEXT,
+                    number TEXT,
+                    message_id BIGINT,
+                    updated_at BIGINT,
+                    PRIMARY KEY (user_id, number)
+                );
+            `
+        }).catch(() => {
+            // Tables might already exist, ignore error
+        });
+
+        console.log('✅ Database initialized');
+    } catch (e) {
+        console.log('Database init error:', e.message);
+    }
+}
 
 let botStats = {
     totalOTPs: 0,
@@ -153,75 +203,128 @@ let botStats = {
     errors: 0
 };
 
-// Load stats
-try {
-    if (fs.existsSync(STATS_FILE)) {
-        const statsData = JSON.parse(fs.readFileSync(STATS_FILE, 'utf8'));
-        botStats = { 
-            ...botStats, 
-            ...statsData, 
-            activeUsers: new Set(statsData.activeUsers || []), 
-            botUptime: statsData.botUptime || Date.now() 
-        };
-    }
-} catch (e) {}
-
-// Load numbers cache
-try {
-    if (fs.existsSync(NUMBERS_FILE)) {
-        const numbersData = JSON.parse(fs.readFileSync(NUMBERS_FILE, 'utf8'));
-        rotatingNumbersCache = numbersData.rotating || [];
-        allNumbersCache = numbersData.all || [];
-        console.log(`Loaded ${allNumbersCache.length} numbers from cache`);
-    }
-} catch (e) {}
-
-// Load subscribers
-try {
-    if (fs.existsSync(SUBSCRIBERS_FILE)) {
-        const subsData = JSON.parse(fs.readFileSync(SUBSCRIBERS_FILE, 'utf8'));
-        for (const [num, users] of Object.entries(subsData)) {
-            numberSubscribers.set(num, new Set(users));
+// Load all data from Supabase
+async function loadFromDatabase() {
+    try {
+        // Load stats
+        const { data: statsData } = await supabase.from('bot_stats').select('*');
+        if (statsData) {
+            for (const row of statsData) {
+                if (row.key === 'activeUsers') {
+                    botStats.activeUsers = new Set(JSON.parse(row.value));
+                } else if (row.key === 'botUptime') {
+                    botStats.botUptime = parseInt(row.value);
+                } else {
+                    botStats[row.key] = isNaN(row.value) ? row.value : parseInt(row.value);
+                }
+            }
         }
-        console.log(`Loaded ${numberSubscribers.size} number subscriptions`);
-    }
-} catch (e) {}
 
-function saveStats() {
-    try {
-        const statsToSave = { ...botStats, activeUsers: Array.from(botStats.activeUsers) };
-        fs.writeFileSync(STATS_FILE, JSON.stringify(statsToSave, null, 2));
-    } catch (e) {}
-}
+        // Load numbers
+        const { data: numbersData } = await supabase
+            .from('bot_numbers')
+            .select('number')
+            .order('last_seen', { ascending: false });
 
-function saveNumbersCache() {
-    try {
-        const numbersToSave = {
-            rotating: rotatingNumbersCache,
-            all: allNumbersCache,
-            lastSaved: Date.now()
-        };
-        fs.writeFileSync(NUMBERS_FILE, JSON.stringify(numbersToSave, null, 2));
-    } catch (e) {}
-}
-
-function saveSubscribers() {
-    try {
-        const subsToSave = {};
-        for (const [num, users] of numberSubscribers) {
-            subsToSave[num] = Array.from(users);
+        if (numbersData) {
+            allNumbersCache = numbersData.map(r => r.number);
+            rotatingNumbersCache = allNumbersCache.slice(0, 60);
+            console.log(`✅ Loaded ${allNumbersCache.length} numbers from database`);
         }
-        fs.writeFileSync(SUBSCRIBERS_FILE, JSON.stringify(subsToSave, null, 2));
+
+        // Load subscribers
+        const { data: subsData } = await supabase
+            .from('bot_subscribers')
+            .select('number, user_id');
+
+        if (subsData) {
+            for (const row of subsData) {
+                if (!numberSubscribers.has(row.number)) {
+                    numberSubscribers.set(row.number, new Set());
+                }
+                numberSubscribers.get(row.number).add(row.user_id);
+            }
+            console.log(`✅ Loaded ${numberSubscribers.size} number subscriptions`);
+        }
+    } catch (e) {
+        console.error('Load from database error:', e.message);
+    }
+}
+
+// Save functions
+async function saveStats() {
+    try {
+        const statsToSave = [
+            { key: 'totalOTPs', value: botStats.totalOTPs.toString() },
+            { key: 'totalNumbers', value: botStats.totalNumbers.toString() },
+            { key: 'activeUsers', value: JSON.stringify(Array.from(botStats.activeUsers)) },
+            { key: 'botUptime', value: botStats.botUptime.toString() },
+            { key: 'lastOTP', value: botStats.lastOTP || '' },
+            { key: 'apiCalls', value: botStats.apiCalls.toString() },
+            { key: 'errors', value: botStats.errors.toString() }
+        ];
+
+        await supabase.from('bot_stats').upsert(statsToSave);
     } catch (e) {}
 }
 
-// Auto-save every 5 minutes
-setInterval(() => {
-    saveStats();
-    saveNumbersCache();
-    saveSubscribers();
-    console.log('💾 Auto-saved stats, numbers, and subscribers');
-}, 5 * 60 * 1000);
+async function saveNumberToDatabase(number, country) {
+    try {
+        await supabase.from('bot_numbers').upsert({
+            number: number,
+            country: country,
+            first_seen: Date.now(),
+            last_seen: Date.now()
+        });
+    } catch (e) {}
+}
+
+async function saveSubscriber(number, userId) {
+    try {
+        await supabase.from('bot_subscribers').upsert({
+            number: number,
+            user_id: userId,
+            subscribed_at: Date.now()
+        });
+    } catch (e) {}
+}
+
+async function removeSubscriberFromDb(number, userId) {
+    try {
+        await supabase.from('bot_subscribers')
+            .delete()
+            .eq('number', number)
+            .eq('user_id', userId);
+    } catch (e) {}
+}
+
+async function saveUserMessage(userId, number, messageId) {
+    try {
+        await supabase.from('bot_user_messages').upsert({
+            user_id: userId,
+            number: number,
+            message_id: messageId,
+            updated_at: Date.now()
+        });
+    } catch (e) {}
+}
+
+async function getUserMessage(userId, number) {
+    try {
+        const { data } = await supabase
+            .from('bot_user_messages')
+            .select('message_id')
+            .eq('user_id', userId)
+            .eq('number', number)
+            .single();
+        return data?.message_id;
+    } catch (e) {
+        return null;
+    }
+}
+
+// Initialize on startup
+initDatabase().then(() => loadFromDatabase());
 
 // COMPACT COUNTRY DATABASE
 const countryDb = {
@@ -345,10 +448,11 @@ function buildNumbersListMarkdown(serviceName, numbers) {
     markdown += `| # | ${smallCaps('Number')} |\n`;
     markdown += `| --- | --- |\n`;
     numbers.forEach((num, i) => {
-        markdown += `| ${i + 1} | ${num} |\n`;
+        // Wrap in backticks for copyable code format
+        markdown += `| ${i + 1} | \`${num}\` |\n`;
     });
 
-    markdown += `\n${smallCaps('Click a number to subscribe:')}`;
+    markdown += `\n${smallCaps('Tap number to copy, then click subscribe:')}`;
     return markdown;
 }
 
@@ -610,12 +714,15 @@ async function processSms(service, number, message, date) {
             if (!allNumbersCache.includes(cleanNum)) {
                 allNumbersCache.push(cleanNum);
                 if (allNumbersCache.length > 500) allNumbersCache = allNumbersCache.slice(-500);
+
+                // Save to Supabase
+                const country = getCountry(cleanNum);
+                saveNumberToDatabase(cleanNum, country);
             }
             botStats.totalOTPs++;
             botStats.totalNumbers = allNumbersCache.length;
             botStats.lastOTP = date;
             saveStats();
-            saveNumbersCache(); // Save immediately when new number found
         }
 
         const country = getCountry(number);
@@ -649,12 +756,12 @@ async function processSms(service, number, message, date) {
             ]);
         }
 
-        // Send full OTP to subscribers (private) - EDIT their existing message
+        // Send full OTP to subscribers - EDIT their existing message
         if (hasSubscribers) {
             const subMarkdown = `# ${smallCaps('OTP RECEIVED')}\n\n` +
-                                `| ${smallCaps('Number')} | ${cleanNum} |\n` +
+                                `| ${smallCaps('Number')} | \`${cleanNum}\` |\n` +
                                 `| --- | --- |\n` +
-                                `| ${smallCaps('Code')} | ${code} |\n` +
+                                `| ${smallCaps('Code')} | \`${code}\` |\n` +
                                 `| ${smallCaps('Service')} | ${detectedService} |\n` +
                                 `| ${smallCaps('Time')} | ${new Date().toLocaleString()} |\n\n` +
                                 `${smallCaps('Full message:')}\n` +
@@ -662,11 +769,31 @@ async function processSms(service, number, message, date) {
 
             for (const uid of subscribers) {
                 try {
-                    // Send new message with OTP (since we can't track which message to edit)
-                    await sendRichMessage(uid, subMarkdown, [
-                        { text: 'CHECK OTP', callback_data: `check_otp_${cleanNum}` },
+                    // Try to EDIT existing message first
+                    const lastMsgId = await getUserMessage(uid, cleanNum);
+
+                    if (lastMsgId) {
+                        try {
+                            await editRichMessage(uid, lastMsgId, subMarkdown, [
+                                { text: '✅ OTP RECEIVED', callback_data: 'noop' },
+                                { text: 'UNSUBSCRIBE', callback_data: `unsubscribe_${cleanNum}` }
+                            ]);
+                            continue; // Skip sending new message if edit worked
+                        } catch (editErr) {
+                            // Edit failed, send new message below
+                        }
+                    }
+
+                    // Send new message only if no existing message to edit
+                    const sentMsg = await sendRichMessage(uid, subMarkdown, [
+                        { text: '🔄 CHECK OTP', callback_data: `check_otp_${cleanNum}` },
                         { text: 'UNSUBSCRIBE', callback_data: `unsubscribe_${cleanNum}` }
                     ]);
+
+                    // Store message ID for future edits
+                    if (sentMsg?.result?.message_id) {
+                        await saveUserMessage(uid, cleanNum, sentMsg.result.message_id);
+                    }
                 } catch (e) {
                     if (e.response && e.response.statusCode === 403) {
                         subscribers.delete(uid);
@@ -964,6 +1091,65 @@ async function handleCallbackQuery(callbackQuery) {
         return;
     }
 
+    // COUNTRY SELECTED - Show services for that country
+    if (data && data.startsWith('country_')) {
+        const countryCode = data.replace('country_', '');
+        await answerCallback(callbackQuery.id, 'Select service', true);
+
+        // Store selected country
+        userSelectedCountry.set(userId, countryCode);
+
+        const countryNames = {
+            '1': 'USA', '44': 'UK', '234': 'Nigeria', '91': 'India',
+            '254': 'Kenya', '27': 'South Africa', '49': 'Germany',
+            '33': 'France', '7': 'Russia', '90': 'Turkey',
+            '55': 'Brazil', '52': 'Mexico', 'all': 'All Countries'
+        };
+        const countryName = countryNames[countryCode] || 'Unknown';
+
+        const markdown = `# ${smallCaps('SELECT SERVICE')}\n\n` +
+                         `| ${smallCaps('Country')} | ${countryName} |\n` +
+                         `| --- | --- |\n\n` +
+                         `${smallCaps('Choose a service:')}`;
+
+        await sendRichMessage(chatId, markdown, [
+            { text: 'WHATSAPP', callback_data: 'service_whatsapp' },
+            { text: 'FACEBOOK', callback_data: 'service_facebook' },
+            { text: 'TELEGRAM', callback_data: 'service_telegram' },
+            { text: 'INSTAGRAM', callback_data: 'service_instagram' },
+            { text: 'GOOGLE', callback_data: 'service_google' },
+            { text: 'APPLE', callback_data: 'service_apple' },
+            { text: 'TIKTOK', callback_data: 'service_tiktok' },
+            { text: 'RANDOM', callback_data: 'service_random' }
+        ]);
+        return;
+    }
+
+    // ADMIN PANEL - Show admin controls
+    if (data === "admin_panel") {
+        if (!ADMIN_IDS.includes(userId)) {
+            await answerCallback(callbackQuery.id, 'Access denied', true);
+            return;
+        }
+
+        await answerCallback(callbackQuery.id, 'Admin panel', true);
+
+        const markdown = `# ${smallCaps('ADMIN CONTROL PANEL')}\n\n` +
+                         `| ${smallCaps('Bot Status')} | ${isBotActive ? smallCaps('Active') : smallCaps('Paused')} |\n` +
+                         `| --- | --- |\n` +
+                         `| ${smallCaps('Version')} | 3.3 Premium |\n\n` +
+                         `${smallCaps('Select an action:')}`;
+
+        await sendRichMessage(chatId, markdown, [
+            { text: '📊 STATISTICS', callback_data: 'admin_stats' },
+            { text: '⏸️ PAUSE', callback_data: 'admin_pause' },
+            { text: '▶️ RESUME', callback_data: 'admin_resume' },
+            { text: '🗑️ CLEAR CACHE', callback_data: 'admin_clear' },
+            { text: '🚫 BANNED USERS', callback_data: 'admin_banned' }
+        ]);
+        return;
+    }
+
     // VERIFY JOIN - Check if user joined required channels
     if (data === "verify_join") {
         await answerCallback(callbackQuery.id, 'Verifying...', true);
@@ -996,7 +1182,7 @@ async function handleCallbackQuery(callbackQuery) {
         return;
     }
 
-    // GET NUMBER - Check force join first, then show service selection
+    // GET NUMBER - Check force join first, then show country selection
     if (data === "get_number") {
         // Check force join
         const joinCheck = await checkForceJoin(userId);
@@ -1006,21 +1192,36 @@ async function handleCallbackQuery(callbackQuery) {
             return;
         }
 
-        await answerCallback(callbackQuery.id, 'Select a service', true);
+        await answerCallback(callbackQuery.id, 'Select country', true);
 
-        await sendRichMessage(chatId, buildServiceMenuMarkdown(), [
-            { text: 'WHATSAPP', callback_data: 'service_whatsapp' },
-            { text: 'FACEBOOK', callback_data: 'service_facebook' },
-            { text: 'TELEGRAM', callback_data: 'service_telegram' },
-            { text: 'INSTAGRAM', callback_data: 'service_instagram' },
-            { text: 'GOOGLE', callback_data: 'service_google' },
-            { text: 'APPLE', callback_data: 'service_apple' },
-            { text: 'RANDOM', callback_data: 'service_random' }
-        ]);
+        const markdown = `# ${smallCaps('SELECT COUNTRY')}\n\n` +
+                         `${smallCaps('Choose a country to get numbers from:')}`;
+
+        const countryButtons = [
+            { text: '🇺🇸 USA', callback_data: 'country_1' },
+            { text: '🇬🇧 UK', callback_data: 'country_44' },
+            { text: '🇳🇬 NIGERIA', callback_data: 'country_234' },
+            { text: '🇮🇳 INDIA', callback_data: 'country_91' },
+            { text: '🇰🇪 KENYA', callback_data: 'country_254' },
+            { text: '🇿🇦 SOUTH AFRICA', callback_data: 'country_27' },
+            { text: '🇩🇪 GERMANY', callback_data: 'country_49' },
+            { text: '🇫🇷 FRANCE', callback_data: 'country_33' },
+            { text: '🇷🇺 RUSSIA', callback_data: 'country_7' },
+            { text: '🇹🇷 TURKEY', callback_data: 'country_90' },
+            { text: '🇧🇷 BRAZIL', callback_data: 'country_55' },
+            { text: '🇲🇽 MEXICO', callback_data: 'country_52' },
+            { text: '🌍 ALL COUNTRIES', callback_data: 'country_all' }
+        ];
+
+        if (ADMIN_IDS.includes(userId)) {
+            countryButtons.push({ text: '⚙️ ADMIN', callback_data: 'admin_panel' });
+        }
+
+        await sendRichMessage(chatId, markdown, countryButtons);
         return;
     }
 
-    // SERVICE SELECTED - Show numbers
+    // SERVICE SELECTED - Show numbers filtered by country
     if (data && data.startsWith('service_')) {
         const serviceType = data.replace('service_', '');
         await answerCallback(callbackQuery.id, `Selected: ${serviceType}`, true);
@@ -1029,23 +1230,51 @@ async function handleCallbackQuery(callbackQuery) {
 
         try {
             let allNumbers = await fetchAllNumbers();
-            if (allNumbers.length === 0) {
-                return editRichMessage(chatId, loadingMsg.result.message_id,
-                    `# ${smallCaps('NO NUMBERS')}\n\n${smallCaps('No numbers available yet. Please wait for OTPs to arrive.')}`);
+
+            // Filter by selected country
+            const selectedCountry = userSelectedCountry.get(userId);
+            if (selectedCountry && selectedCountry !== 'all') {
+                allNumbers = filterNumbersByCountry(allNumbers, selectedCountry);
             }
 
-            const randomNumbers = allNumbers.sort(() => 0.5 - Math.random()).slice(0, 5);
+            // Remove duplicates and diversify prefixes
+            const uniqueNumbers = [];
+            const seenPrefixes = new Set();
+
+            for (const num of allNumbers) {
+                const prefix = String(num).substring(0, 7);
+                // Allow max 2 numbers per prefix to ensure variety
+                const prefixCount = Array.from(seenPrefixes).filter(p => p.startsWith(prefix.substring(0, 5))).length;
+                if (prefixCount < 2) {
+                    uniqueNumbers.push(num);
+                    seenPrefixes.add(prefix);
+                }
+                if (uniqueNumbers.length >= 10) break;
+            }
+
+            if (uniqueNumbers.length === 0) {
+                return editRichMessage(chatId, loadingMsg.result.message_id,
+                    `# ${smallCaps('NO NUMBERS')}\n\n${smallCaps('No numbers for this country yet.')}\n${smallCaps('Try another country or check back later.')}`,
+                    [{ text: '🔄 TRY AGAIN', callback_data: 'get_number' }]
+                );
+            }
+
+            // Get 5 diverse numbers
+            const randomNumbers = uniqueNumbers.sort(() => 0.5 - Math.random()).slice(0, 5);
 
             const serviceNames = {
                 whatsapp: "WhatsApp", facebook: "Facebook", telegram: "Telegram",
-                instagram: "Instagram", google: "Google", apple: "Apple", random: "Random"
+                instagram: "Instagram", google: "Google", apple: "Apple", 
+                tiktok: "TikTok", random: "Random"
             };
             const name = serviceNames[serviceType] || serviceType;
 
             const subscribeButtons = randomNumbers.map(num => ({
-                text: `SUBSCRIBE: ${num}`,
+                text: `SUB: ${num.slice(-8)}`,
                 callback_data: `subscribe_${num}`
             }));
+
+            subscribeButtons.push({ text: '🔄 MORE', callback_data: `service_${serviceType}` });
 
             await editRichMessage(chatId, loadingMsg.result.message_id,
                 buildNumbersListMarkdown(name, randomNumbers),
@@ -1066,7 +1295,7 @@ async function handleCallbackQuery(callbackQuery) {
             numberSubscribers.set(number, new Set());
         }
         numberSubscribers.get(number).add(userId);
-        saveSubscribers(); // Save immediately
+        saveSubscriber(number, userId); // Save to Supabase // Save immediately
 
         const markdown = `# ${smallCaps('SUBSCRIBED SUCCESSFULLY')}\n\n` +
                          `| ${smallCaps('Number')} | ${number} |\n` +
@@ -1083,12 +1312,18 @@ async function handleCallbackQuery(callbackQuery) {
         return;
     }
 
+    // NOOP - Do nothing (for received OTP buttons)
+    if (data === "noop") {
+        await answerCallback(callbackQuery.id, 'OTP already received!', true);
+        return;
+    }
+
     // CHECK OTP - Show waiting message or latest OTP
     if (data && data.startsWith('check_otp_')) {
         const number = data.replace('check_otp_', '');
-        await answerCallback(callbackQuery.id, 'Checking for OTP...', true);
+        await answerCallback(callbackQuery.id, 'Checking...', true);
 
-        // Check if there's a recent OTP for this number
+        // Check subscription
         const subscribers = numberSubscribers.get(number);
         if (!subscribers || !subscribers.has(userId)) {
             await editRichMessage(chatId, msg.message_id,
@@ -1098,13 +1333,15 @@ async function handleCallbackQuery(callbackQuery) {
             return;
         }
 
-        // Show waiting status (OTP will be pushed automatically when received)
+        // Store message ID for OTP editing
+        await saveUserMessage(userId, number, msg.message_id);
+
         const markdown = `# ${smallCaps('OTP STATUS')}\n\n` +
-                         `| ${smallCaps('Number')} | ${number} |\n` +
+                         `| ${smallCaps('Number')} | \`${number}\` |\n` +
                          `| --- | --- |\n` +
-                         `| ${smallCaps('Status')} | ${smallCaps('Waiting for OTP...')} |\n\n` +
-                         `${smallCaps('OTP will appear here automatically when received.')}\n` +
-                         `${smallCaps('Keep this chat open or check back later.')}`;
+                         `| ${smallCaps('Status')} | ${smallCaps('⏳ Waiting for OTP...')} |\n\n` +
+                         `${smallCaps('OTP will appear here automatically.')}\n` +
+                         `${smallCaps('This message updates when OTP arrives.')}`;
 
         await editRichMessage(chatId, msg.message_id, markdown, [
             { text: '🔄 REFRESH', callback_data: `check_otp_${number}` },
@@ -1121,7 +1358,7 @@ async function handleCallbackQuery(callbackQuery) {
         if (subs && subs.has(userId)) {
             subs.delete(userId);
             if (subs.size === 0) numberSubscribers.delete(number);
-            saveSubscribers(); // Save immediately
+            removeSubscriberFromDb(number, userId); // Remove from Supabase
 
             await answerCallback(callbackQuery.id, 'Unsubscribed', true);
             await editRichMessage(chatId, msg.message_id,
