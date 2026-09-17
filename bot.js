@@ -1,22 +1,3 @@
-/* 
-LONER TECH NUMBER BOT v3.5
-Premium OTP Service with Supabase Database
-
-FIXES IN THIS VERSION:
-✅ Numbers copyable (backtick code format)
-✅ GET NUMBER button in group works (deep link)
-✅ Country selection (not just Nigeria)
-✅ Diverse numbers (not all 2347020 prefix)
-✅ Message editing (no spam)
-✅ Admin button shows on start
-✅ Supabase database (FREE - survives restart)
-
-SETUP:
-1. Create free account at https://supabase.com
-2. Create new project
-3. Get URL and anon key from Settings → API
-4. Add to Render environment variables
-*/
 
 require('dotenv').config();
 const axios = require('axios');
