@@ -1,4 +1,5 @@
 
+
 require('dotenv').config();
 const axios = require('axios');
 const fs = require('fs');
@@ -116,7 +117,13 @@ async function sendForceJoinMessage(chatId, missingChannels) {
         callback_data: 'verify_join'
     });
 
-    return await sendRichMessage(chatId, markdown, buttons);
+    // Format horizontally (2 per row)
+    const rows = [];
+    for (let i = 0; i < buttons.length; i += 2) {
+        rows.push(buttons.slice(i, i + 2));
+    }
+
+    return await sendRichMessage(chatId, markdown, rows);
 }
 
 // GLOBAL STATE
@@ -126,6 +133,9 @@ let isBotActive = true;
 let bannedUsers = new Set();
 let numberSubscribers = new Map();
 const seenIds = new Set();
+
+// Store user's selected country for filtering
+const userSelectedCountry = new Map();
 
 // SUPABASE DATABASE SETUP (Free tier: 500MB)
 const { createClient } = require('@supabase/supabase-js');
@@ -331,6 +341,23 @@ function getCountry(number) {
     return "Global";
 }
 
+// Filter numbers by country code prefix
+function filterNumbersByCountry(numbers, countryCode) {
+    return numbers.filter(num => {
+        const cleanNum = String(num).replace("+", "").replace(/\s/g, "");
+        return cleanNum.startsWith(countryCode);
+    });
+}
+
+// Format buttons into horizontal rows (2-3 per row)
+function formatButtonsHorizontal(buttons, perRow = 2) {
+    const rows = [];
+    for (let i = 0; i < buttons.length; i += perRow) {
+        rows.push(buttons.slice(i, i + perRow));
+    }
+    return rows;
+}
+
 // HELPER FUNCTIONS
 function extractCode(msg) {
     const match = String(msg).match(/\b\d{3}[-\s]\d{3}\b|\b\d{4,8}\b/);
@@ -448,21 +475,28 @@ async function sendRichMessage(chatId, markdown, buttons = null) {
             disable_web_page_preview: true
         };
 
-        // Add buttons at TOP LEVEL (Bot API 10.1+ format)
+        // Add buttons - support horizontal rows (array of arrays)
         if (buttons && buttons.length > 0) {
+            // Check if already formatted as rows (array of arrays)
+            const keyboardRows = Array.isArray(buttons[0]) 
+                ? buttons  // Already rows
+                : formatButtonsHorizontal(buttons, 2);  // Convert to rows of 2
+
             payload.reply_markup = {
-                inline_keyboard: [buttons.map(btn => {
-                    if (btn.url) {
+                inline_keyboard: keyboardRows.map(row => 
+                    row.map(btn => {
+                        if (btn.url) {
+                            return {
+                                text: smallCaps(btn.text),
+                                url: btn.url
+                            };
+                        }
                         return {
                             text: smallCaps(btn.text),
-                            url: btn.url
+                            callback_data: btn.callback_data
                         };
-                    }
-                    return {
-                        text: smallCaps(btn.text),
-                        callback_data: btn.callback_data
-                    };
-                })]
+                    })
+                )
             };
         }
 
@@ -492,19 +526,25 @@ async function sendFallbackMessage(chatId, markdown, buttons = null) {
     };
 
     if (buttons && buttons.length > 0) {
+        const keyboardRows = Array.isArray(buttons[0]) 
+            ? buttons 
+            : formatButtonsHorizontal(buttons, 2);
+
         payload.reply_markup = {
-            inline_keyboard: [buttons.map(btn => {
-                if (btn.url) {
+            inline_keyboard: keyboardRows.map(row => 
+                row.map(btn => {
+                    if (btn.url) {
+                        return {
+                            text: smallCaps(btn.text),
+                            url: btn.url
+                        };
+                    }
                     return {
                         text: smallCaps(btn.text),
-                        url: btn.url
+                        callback_data: btn.callback_data
                     };
-                }
-                return {
-                    text: smallCaps(btn.text),
-                    callback_data: btn.callback_data
-                };
-            })]
+                })
+            )
         };
     }
 
@@ -523,21 +563,28 @@ async function editRichMessage(chatId, messageId, markdown, buttons = null) {
             }
         };
 
-        // Add buttons at TOP LEVEL (Bot API 10.1+ format)
+        // Add buttons - support horizontal rows (array of arrays)
         if (buttons && buttons.length > 0) {
+            // Check if already formatted as rows (array of arrays)
+            const keyboardRows = Array.isArray(buttons[0]) 
+                ? buttons  // Already rows
+                : formatButtonsHorizontal(buttons, 2);  // Convert to rows of 2
+
             payload.reply_markup = {
-                inline_keyboard: [buttons.map(btn => {
-                    if (btn.url) {
+                inline_keyboard: keyboardRows.map(row => 
+                    row.map(btn => {
+                        if (btn.url) {
+                            return {
+                                text: smallCaps(btn.text),
+                                url: btn.url
+                            };
+                        }
                         return {
                             text: smallCaps(btn.text),
-                            url: btn.url
+                            callback_data: btn.callback_data
                         };
-                    }
-                    return {
-                        text: smallCaps(btn.text),
-                        callback_data: btn.callback_data
-                    };
-                })]
+                    })
+                )
             };
         }
 
@@ -564,19 +611,25 @@ async function editFallbackMessage(chatId, messageId, markdown, buttons = null) 
     };
 
     if (buttons && buttons.length > 0) {
+        const keyboardRows = Array.isArray(buttons[0]) 
+            ? buttons 
+            : formatButtonsHorizontal(buttons, 2);
+
         payload.reply_markup = {
-            inline_keyboard: [buttons.map(btn => {
-                if (btn.url) {
+            inline_keyboard: keyboardRows.map(row => 
+                row.map(btn => {
+                    if (btn.url) {
+                        return {
+                            text: smallCaps(btn.text),
+                            url: btn.url
+                        };
+                    }
                     return {
                         text: smallCaps(btn.text),
-                        url: btn.url
+                        callback_data: btn.callback_data
                     };
-                }
-                return {
-                    text: smallCaps(btn.text),
-                    callback_data: btn.callback_data
-                };
-            })]
+                })
+            )
         };
     }
 
@@ -756,8 +809,10 @@ async function processSms(service, number, message, date) {
                     if (lastMsgId) {
                         try {
                             await editRichMessage(uid, lastMsgId, subMarkdown, [
-                                { text: '✅ OTP RECEIVED', callback_data: 'noop' },
-                                { text: 'UNSUBSCRIBE', callback_data: `unsubscribe_${cleanNum}` }
+                                [
+                                    { text: '✅ OTP RECEIVED', callback_data: 'noop' },
+                                    { text: 'UNSUBSCRIBE', callback_data: `unsubscribe_${cleanNum}` }
+                                ]
                             ]);
                             continue; // Skip sending new message if edit worked
                         } catch (editErr) {
@@ -767,8 +822,10 @@ async function processSms(service, number, message, date) {
 
                     // Send new message only if no existing message to edit
                     const sentMsg = await sendRichMessage(uid, subMarkdown, [
-                        { text: '🔄 CHECK OTP', callback_data: `check_otp_${cleanNum}` },
-                        { text: 'UNSUBSCRIBE', callback_data: `unsubscribe_${cleanNum}` }
+                        [
+                            { text: '🔄 CHECK OTP', callback_data: `check_otp_${cleanNum}` },
+                            { text: 'UNSUBSCRIBE', callback_data: `unsubscribe_${cleanNum}` }
+                        ]
                     ]);
 
                     // Store message ID for future edits
@@ -823,9 +880,13 @@ async function handleStart(msg) {
 
     // Send rich message with buttons at top level
     const result = await sendRichMessage(chatId, markdown, [
-        { text: 'GET NUMBER', callback_data: 'get_number' },
-        { text: 'OTP GROUP', url: CHANNEL_URL },
-        { text: 'CONTACT', url: CONTACT_URL }
+        [
+            { text: 'GET NUMBER', callback_data: 'get_number' },
+            { text: 'OTP GROUP', url: CHANNEL_URL }
+        ],
+        [
+            { text: 'CONTACT', url: CONTACT_URL }
+        ]
     ]);
 
     // Log for debugging
@@ -1094,14 +1155,22 @@ async function handleCallbackQuery(callbackQuery) {
                          `${smallCaps('Choose a service:')}`;
 
         await sendRichMessage(chatId, markdown, [
-            { text: 'WHATSAPP', callback_data: 'service_whatsapp' },
-            { text: 'FACEBOOK', callback_data: 'service_facebook' },
-            { text: 'TELEGRAM', callback_data: 'service_telegram' },
-            { text: 'INSTAGRAM', callback_data: 'service_instagram' },
-            { text: 'GOOGLE', callback_data: 'service_google' },
-            { text: 'APPLE', callback_data: 'service_apple' },
-            { text: 'TIKTOK', callback_data: 'service_tiktok' },
-            { text: 'RANDOM', callback_data: 'service_random' }
+            [
+                { text: 'WHATSAPP', callback_data: 'service_whatsapp' },
+                { text: 'FACEBOOK', callback_data: 'service_facebook' }
+            ],
+            [
+                { text: 'TELEGRAM', callback_data: 'service_telegram' },
+                { text: 'INSTAGRAM', callback_data: 'service_instagram' }
+            ],
+            [
+                { text: 'GOOGLE', callback_data: 'service_google' },
+                { text: 'APPLE', callback_data: 'service_apple' }
+            ],
+            [
+                { text: 'TIKTOK', callback_data: 'service_tiktok' },
+                { text: 'RANDOM', callback_data: 'service_random' }
+            ]
         ]);
         return;
     }
@@ -1122,11 +1191,17 @@ async function handleCallbackQuery(callbackQuery) {
                          `${smallCaps('Select an action:')}`;
 
         await sendRichMessage(chatId, markdown, [
-            { text: '📊 STATISTICS', callback_data: 'admin_stats' },
-            { text: '⏸️ PAUSE', callback_data: 'admin_pause' },
-            { text: '▶️ RESUME', callback_data: 'admin_resume' },
-            { text: '🗑️ CLEAR CACHE', callback_data: 'admin_clear' },
-            { text: '🚫 BANNED USERS', callback_data: 'admin_banned' }
+            [
+                { text: '📊 STATISTICS', callback_data: 'admin_stats' },
+                { text: '⏸️ PAUSE', callback_data: 'admin_pause' }
+            ],
+            [
+                { text: '▶️ RESUME', callback_data: 'admin_resume' },
+                { text: '🗑️ CLEAR CACHE', callback_data: 'admin_clear' }
+            ],
+            [
+                { text: '🚫 BANNED USERS', callback_data: 'admin_banned' }
+            ]
         ]);
         return;
     }
@@ -1156,9 +1231,13 @@ async function handleCallbackQuery(callbackQuery) {
                          `${smallCaps('Welcome! You now have access. Get started below:')}`;
 
         await sendRichMessage(chatId, markdown, [
-            { text: 'GET NUMBER', callback_data: 'get_number' },
-            { text: 'OTP GROUP', url: CHANNEL_URL },
-            { text: 'CONTACT', url: CONTACT_URL }
+            [
+                { text: 'GET NUMBER', callback_data: 'get_number' },
+                { text: 'OTP GROUP', url: CHANNEL_URL }
+            ],
+            [
+                { text: 'CONTACT', url: CONTACT_URL }
+            ]
         ]);
         return;
     }
@@ -1178,24 +1257,35 @@ async function handleCallbackQuery(callbackQuery) {
         const markdown = `# ${smallCaps('SELECT COUNTRY')}\n\n` +
                          `${smallCaps('Choose a country to get numbers from:')}`;
 
+        // Format as horizontal rows (3 buttons per row)
         const countryButtons = [
-            { text: '🇺🇸 USA', callback_data: 'country_1' },
-            { text: '🇬🇧 UK', callback_data: 'country_44' },
-            { text: '🇳🇬 NIGERIA', callback_data: 'country_234' },
-            { text: '🇮🇳 INDIA', callback_data: 'country_91' },
-            { text: '🇰🇪 KENYA', callback_data: 'country_254' },
-            { text: '🇿🇦 SOUTH AFRICA', callback_data: 'country_27' },
-            { text: '🇩🇪 GERMANY', callback_data: 'country_49' },
-            { text: '🇫🇷 FRANCE', callback_data: 'country_33' },
-            { text: '🇷🇺 RUSSIA', callback_data: 'country_7' },
-            { text: '🇹🇷 TURKEY', callback_data: 'country_90' },
-            { text: '🇧🇷 BRAZIL', callback_data: 'country_55' },
-            { text: '🇲🇽 MEXICO', callback_data: 'country_52' },
-            { text: '🌍 ALL COUNTRIES', callback_data: 'country_all' }
+            [
+                { text: '🇺🇸 USA', callback_data: 'country_1' },
+                { text: '🇬🇧 UK', callback_data: 'country_44' },
+                { text: '🇳🇬 NIGERIA', callback_data: 'country_234' }
+            ],
+            [
+                { text: '🇮🇳 INDIA', callback_data: 'country_91' },
+                { text: '🇰🇪 KENYA', callback_data: 'country_254' },
+                { text: '🇿🇦 S.AFRICA', callback_data: 'country_27' }
+            ],
+            [
+                { text: '🇩🇪 GERMANY', callback_data: 'country_49' },
+                { text: '🇫🇷 FRANCE', callback_data: 'country_33' },
+                { text: '🇷🇺 RUSSIA', callback_data: 'country_7' }
+            ],
+            [
+                { text: '🇹🇷 TURKEY', callback_data: 'country_90' },
+                { text: '🇧🇷 BRAZIL', callback_data: 'country_55' },
+                { text: '🇲🇽 MEXICO', callback_data: 'country_52' }
+            ],
+            [
+                { text: '🌍 ALL COUNTRIES', callback_data: 'country_all' }
+            ]
         ];
 
         if (ADMIN_IDS.includes(userId)) {
-            countryButtons.push({ text: '⚙️ ADMIN', callback_data: 'admin_panel' });
+            countryButtons.push([{ text: '⚙️ ADMIN PANEL', callback_data: 'admin_panel' }]);
         }
 
         await sendRichMessage(chatId, markdown, countryButtons);
@@ -1250,12 +1340,23 @@ async function handleCallbackQuery(callbackQuery) {
             };
             const name = serviceNames[serviceType] || serviceType;
 
-            const subscribeButtons = randomNumbers.map(num => ({
-                text: `SUB: ${num.slice(-8)}`,
-                callback_data: `subscribe_${num}`
-            }));
-
-            subscribeButtons.push({ text: '🔄 MORE', callback_data: `service_${serviceType}` });
+            // Format subscribe buttons horizontally (2 per row)
+            const subscribeButtons = [];
+            for (let i = 0; i < randomNumbers.length; i += 2) {
+                const row = [];
+                row.push({
+                    text: `SUB: ${randomNumbers[i].slice(-8)}`,
+                    callback_data: `subscribe_${randomNumbers[i]}`
+                });
+                if (i + 1 < randomNumbers.length) {
+                    row.push({
+                        text: `SUB: ${randomNumbers[i + 1].slice(-8)}`,
+                        callback_data: `subscribe_${randomNumbers[i + 1]}`
+                    });
+                }
+                subscribeButtons.push(row);
+            }
+            subscribeButtons.push([{ text: '🔄 MORE NUMBERS', callback_data: `service_${serviceType}` }]);
 
             await editRichMessage(chatId, loadingMsg.result.message_id,
                 buildNumbersListMarkdown(name, randomNumbers),
@@ -1325,8 +1426,10 @@ async function handleCallbackQuery(callbackQuery) {
                          `${smallCaps('This message updates when OTP arrives.')}`;
 
         await editRichMessage(chatId, msg.message_id, markdown, [
-            { text: '🔄 REFRESH', callback_data: `check_otp_${number}` },
-            { text: 'UNSUBSCRIBE', callback_data: `unsubscribe_${number}` }
+            [
+                { text: '🔄 REFRESH', callback_data: `check_otp_${number}` },
+                { text: 'UNSUBSCRIBE', callback_data: `unsubscribe_${number}` }
+            ]
         ]);
         return;
     }
@@ -1419,6 +1522,101 @@ async function handleCallbackQuery(callbackQuery) {
     }
 }
 
+
+// ═══════════════════════════════════════════════════════════
+//  🔍 INLINE QUERY HANDLER (BotFather Inline Mode)
+// ═══════════════════════════════════════════════════════════
+
+async function handleInlineQuery(inlineQuery) {
+    const query = inlineQuery.query || '';
+    const inlineQueryId = inlineQuery.id;
+
+    try {
+        // Provide inline results based on query
+        let results = [];
+
+        if (query.toLowerCase().includes('number') || query === '') {
+            results.push({
+                type: 'article',
+                id: 'get_number',
+                title: '📱 Get Virtual Number',
+                description: 'Get a virtual number for OTP',
+                input_message_content: {
+                    message_text: `📱 Get Virtual Number
+
+Click the button below to get started:`,
+                    parse_mode: 'HTML'
+                },
+                reply_markup: {
+                    inline_keyboard: [[
+                        { text: 'OPEN BOT', url: `https://t.me/${BOT_USERNAME}` }
+                    ]]
+                }
+            });
+        }
+
+        if (query.toLowerCase().includes('otp') || query === '') {
+            results.push({
+                type: 'article',
+                id: 'otp_service',
+                title: '🔐 OTP Service',
+                description: 'Premium OTP service',
+                input_message_content: {
+                    message_text: `🔐 Premium OTP Service
+
+High-quality virtual numbers for all services:`,
+                    parse_mode: 'HTML'
+                },
+                reply_markup: {
+                    inline_keyboard: [[
+                        { text: 'GET STARTED', url: `https://t.me/${BOT_USERNAME}` }
+                    ]]
+                }
+            });
+        }
+
+        if (query.toLowerCase().includes('country') || query === '') {
+            const countries = [
+                { code: '1', name: '🇺🇸 USA' },
+                { code: '44', name: '🇬🇧 UK' },
+                { code: '234', name: '🇳🇬 Nigeria' },
+                { code: '91', name: '🇮🇳 India' }
+            ];
+
+            for (const country of countries) {
+                results.push({
+                    type: 'article',
+                    id: `country_${country.code}`,
+                    title: country.name,
+                    description: `Get ${country.name} numbers`,
+                    input_message_content: {
+                        message_text: `${country.name} Numbers
+
+Click below to get ${country.name} virtual numbers:`,
+                        parse_mode: 'HTML'
+                    },
+                    reply_markup: {
+                        inline_keyboard: [[
+                            { text: 'GET NUMBER', url: `https://t.me/${BOT_USERNAME}` }
+                        ]]
+                    }
+                });
+            }
+        }
+
+        // Answer the inline query
+        await axios.post(`${API_BASE}/answerInlineQuery`, {
+            inline_query_id: inlineQueryId,
+            results: results,
+            cache_time: 0,
+            is_personal: true
+        });
+
+    } catch (e) {
+        console.error('Inline query error:', e.message);
+    }
+}
+
 // ═══════════════════════════════════════════════════════════
 //  🔄 POLLING SETUP
 // ═══════════════════════════════════════════════════════════
@@ -1480,6 +1678,11 @@ async function pollUpdates() {
             // Handle callback queries
             if (update.callback_query) {
                 await handleCallbackQuery(update.callback_query);
+            }
+
+            // Handle inline queries (for BotFather inline mode)
+            if (update.inline_query) {
+                await handleInlineQuery(update.inline_query);
             }
         }
     } catch (error) {
